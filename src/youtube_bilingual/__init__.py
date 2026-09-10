@@ -8,7 +8,7 @@ Pipeline:
   4. Local VAD finds the first real speech so intro music is not captioned
   5. An OpenAI text model first splits original speech by meaning, then translates each piece
   6. ffmpeg muxes an ASS subtitle track into an MKV
-     (audio-only sources get a black 720p video track)
+     (audio-only sources get a black 1080p video track)
 
 Timestamped captions require whisper-1 (or gpt-4o-transcribe-diarize).
 gpt-transcribe / gpt-4o-transcribe do not return timestamps.
@@ -73,10 +73,12 @@ MEDIA_SUFFIXES = {
     ".aac",
     ".wma",
 }
-# Still black frame used when muxing audio-only sources so ASS has a picture.
-AUDIO_CANVAS_WIDTH = 1280
-AUDIO_CANVAS_HEIGHT = 720
-AUDIO_CANVAS_FPS = 1
+# Black 1080p canvas for audio-only sources so ASS has a picture.
+# PlayRes is 1920x1080; matching it keeps text on-screen in players that
+# do not scale ASS. 24 fps: some players only refresh subtitles on frames.
+AUDIO_CANVAS_WIDTH = 1920
+AUDIO_CANVAS_HEIGHT = 1080
+AUDIO_CANVAS_FPS = 24
 _STRONG_BREAKS = set("。．.！？!?♪…")
 _WEAK_BREAKS = set("、，,；;：: ")
 LANGUAGE_ALIASES = {
@@ -838,8 +840,12 @@ def write_bilingual_mkv(
     output: Path | None,
     max_line_chars: int,
 ) -> None:
+    if not cues:
+        raise SystemExit("No subtitle cues to mux")
     write_json(work / "bilingual.json", [asdict(cue) for cue in cues])
     ass_text = build_ass(cues, video.title, max_line_chars=max_line_chars)
+    if ass_dialogue_count(ass_text) == 0:
+        raise SystemExit("ASS text has no Dialogue events")
     ass_path = work / "bilingual.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
     output = choose_output_path(
@@ -1288,6 +1294,10 @@ def build_ass(cues: Iterable[Cue], title: str, max_line_chars: int = DEFAULT_MAX
     return "\n".join(lines)
 
 
+def ass_dialogue_count(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.startswith("Dialogue:"))
+
+
 def attachment_mimetype(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix in {".otf", ".otc", ".ttc"}:
@@ -1365,7 +1375,7 @@ def mux_cmd(
                 "-c:a",
                 "copy",
                 "-c:s",
-                "ass",
+                "copy",
             ]
         )
     else:
@@ -1402,7 +1412,7 @@ def mux_cmd(
                 "-c:a",
                 "copy",
                 "-c:s",
-                "ass",
+                "copy",
             ]
         )
     cmd.extend(
@@ -1430,6 +1440,31 @@ def mux_cmd(
     return cmd
 
 
+def count_subtitle_packets(path: Path) -> int:
+    result = run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-count_packets",
+            "-select_streams",
+            "s:0",
+            "-show_entries",
+            "stream=nb_read_packets",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ]
+    )
+    text = result.stdout.strip().splitlines()
+    if not text:
+        return 0
+    try:
+        return int(text[-1])
+    except ValueError:
+        return 0
+
+
 def mux_mkv(video_path: Path, ass_path: Path, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fonts = subtitle_font_files()
@@ -1451,6 +1486,9 @@ def mux_mkv(video_path: Path, ass_path: Path, output_path: Path) -> None:
             f"adding a black {AUDIO_CANVAS_WIDTH}x{AUDIO_CANVAS_HEIGHT} canvas"
         )
     run(mux_cmd(video_path, ass_path, output_path, fonts, audio_canvas_duration=canvas_duration))
+    packets = count_subtitle_packets(output_path)
+    if packets == 0:
+        raise SystemExit(f"ffmpeg muxed no subtitle events into {output_path}")
 
 
 def load_env() -> None:
@@ -1496,6 +1534,8 @@ def self_test() -> None:
         "Dialogue: 0,0:00:01.00,0:00:03.50,Chinese,,0,0,0,,"
         "{\\rOriginal}Hello, world.\\N\\N{\\rChinese}你好，世界。"
     ) in ass
+    assert ass_dialogue_count(ass) == 1
+    assert ass_dialogue_count(build_ass([], "empty")) == 0
     assert font_file_for("DefinitelyNotAFontXYZ-youtube-bilingual") is None
     font_cmd = mux_cmd(
         Path("v.mkv"),
@@ -1513,6 +1553,7 @@ def self_test() -> None:
     assert "-attach" not in mux_cmd(Path("v.mkv"), Path("s.ass"), Path("o.mkv"))
     copy_cmd = mux_cmd(Path("v.mkv"), Path("s.ass"), Path("o.mkv"))
     assert copy_cmd[copy_cmd.index("-c:v") + 1] == "copy"
+    assert copy_cmd[copy_cmd.index("-c:s") + 1] == "copy"
     assert "0:v:0?" in copy_cmd
     canvas_cmd = mux_cmd(
         Path("a.mp3"),
@@ -1527,6 +1568,7 @@ def self_test() -> None:
     assert "c=black" in color
     assert "d=12.500" in color
     assert canvas_cmd[canvas_cmd.index("-c:v") + 1] == "libx264"
+    assert canvas_cmd[canvas_cmd.index("-c:s") + 1] == "copy"
     assert "0:v:0" in canvas_cmd
     assert "1:a:0?" in canvas_cmd
     assert "2:0" in canvas_cmd
@@ -1740,6 +1782,7 @@ def self_test() -> None:
         out = media / "out.mkv"
         mux_mkv(audio, ass, out)
         assert has_playable_video(out)
+        assert count_subtitle_packets(out) == 1
         size = run(
             [
                 "ffprobe",
