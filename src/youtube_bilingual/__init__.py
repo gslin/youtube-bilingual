@@ -40,6 +40,9 @@ DEFAULT_TRANSLATE_MODEL = "gpt-4.1-mini"
 DEFAULT_MAX_LINE_CHARS_CJK = 20
 DEFAULT_MAX_LINE_CHARS_LATIN = 42
 MAX_LINES_PER_CUE = 2
+VAD_SAMPLE_RATE = 16000
+VAD_FRAME_MS = 30
+VAD_MIN_RUN_MS = 270
 TIMESTAMP_ASR_MODELS = ("whisper-1", "gpt-4o-transcribe-diarize")
 CJK_LANGUAGES = {"zh", "ja", "ko"}
 _STRONG_BREAKS = set("。．.！？!?♪…")
@@ -78,6 +81,13 @@ class Cue:
     end: float
     original: str
     zh_hant: str = ""
+
+
+@dataclass
+class Word:
+    word: str
+    start: float
+    end: float
 
 
 @dataclass
@@ -230,6 +240,156 @@ def split_long_cues(cues: list[Cue], max_line_chars: int, max_lines: int = MAX_L
 
 def wrap_ass_text(text: str, max_chars: int) -> str:
     return "\\N".join(ass_escape(part) for part in split_text(text, max_chars))
+
+
+def join_words(words: list[Word]) -> str:
+    parts = [item.word.strip() for item in words if item.word.strip()]
+    if not parts:
+        return ""
+    if mainly_cjk("".join(parts)):
+        return "".join(parts)
+    text = parts[0]
+    for part in parts[1:]:
+        if part.startswith("'") or part.startswith("’"):
+            text += part
+        else:
+            text += " " + part
+    return text
+
+
+def words_to_cues(words: list[Word], max_line_chars: int, max_lines: int = MAX_LINES_PER_CUE) -> list[Cue]:
+    limit = max(max_line_chars * max_lines, 4)
+    batch: list[Word] = []
+    cues: list[Cue] = []
+
+    def flush() -> None:
+        if not batch:
+            return
+        text = join_words(batch)
+        if text:
+            start = batch[0].start
+            end = max(batch[-1].end, start + 0.4)
+            cues.append(Cue(id=len(cues), start=start, end=end, original=text))
+        batch.clear()
+
+    for word in words:
+        if not word.word.strip():
+            continue
+        trial = batch + [word]
+        if batch and len(join_words(trial)) > limit:
+            flush()
+        batch.append(word)
+        text = join_words(batch)
+        if text and text[-1] in _STRONG_BREAKS and len(text) >= max_line_chars:
+            flush()
+    flush()
+    return cues
+
+
+def voiced_runs(voiced: list[bool], frame_ms: int, min_run_ms: int = VAD_MIN_RUN_MS) -> list[tuple[float, float]]:
+    min_frames = max(1, min_run_ms // frame_ms)
+    runs: list[tuple[float, float]] = []
+    index = 0
+    count = len(voiced)
+    while index < count:
+        if not voiced[index]:
+            index += 1
+            continue
+        end = index
+        while end < count and voiced[end]:
+            end += 1
+        if end - index >= min_frames:
+            runs.append((index * frame_ms / 1000.0, end * frame_ms / 1000.0))
+        index = end
+    return runs
+
+
+def pick_speech_onset(runs: list[tuple[float, float]]) -> float:
+    if not runs:
+        return 0.0
+    start, end = runs[0]
+    if start <= 0.2 and (end - start) >= 3.0 and len(runs) >= 2:
+        gap = runs[1][0] - end
+        if gap >= 0.25:
+            return runs[1][0]
+    return start
+
+
+def apply_speech_onset(words: list[Word], onset: float, *, min_intro: float = 1.0) -> list[Word]:
+    if not words or onset < min_intro:
+        return words
+    before = [item for item in words if item.start < onset]
+    after = [item for item in words if item.start >= onset]
+    if not before:
+        return words
+    if after and after[0].start <= onset + 1.0:
+        clamped: list[Word] = []
+        for item in after:
+            start = max(item.start, onset)
+            clamped.append(Word(item.word, start, max(item.end, start + 0.02)))
+        return clamped
+    delta = onset - before[0].start
+    shifted = [Word(item.word, item.start + delta, item.end + delta) for item in before]
+    if not after:
+        return shifted
+    limit = after[0].start
+    trimmed: list[Word] = []
+    for item in shifted:
+        if item.start >= limit:
+            continue
+        end = min(item.end, limit)
+        if end > item.start:
+            trimmed.append(Word(item.word, item.start, end))
+    return trimmed + after
+
+
+def read_pcm16_16k(path: Path) -> bytes:
+    log(f"+ ffmpeg pcm 16k from {path.name}")
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(path),
+            "-ac",
+            "1",
+            "-ar",
+            str(VAD_SAMPLE_RATE),
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "pipe:1",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise SystemExit(f"ffmpeg pcm extract failed: {detail}")
+    return result.stdout
+
+
+def detect_speech_onset(audio_path: Path, *, aggressiveness: int = 3) -> float:
+    import webrtcvad
+
+    pcm = read_pcm16_16k(audio_path)
+    vad = webrtcvad.Vad(aggressiveness)
+    frame_samples = int(VAD_SAMPLE_RATE * VAD_FRAME_MS / 1000)
+    frame_bytes = frame_samples * 2
+    if len(pcm) < frame_bytes:
+        return 0.0
+    voiced: list[bool] = []
+    for index in range(0, len(pcm) - frame_bytes + 1, frame_bytes):
+        frame = pcm[index : index + frame_bytes]
+        try:
+            voiced.append(bool(vad.is_speech(frame, VAD_SAMPLE_RATE)))
+        except Exception:
+            voiced.append(False)
+    return pick_speech_onset(voiced_runs(voiced, VAD_FRAME_MS))
 
 
 def normalize_language(value: str) -> str:
@@ -707,6 +867,27 @@ def self_test() -> None:
     assert wrapped == "一二三四五六七八\\N九十一二三四五六\\N七八九十"
     short_wrap = wrap_ass_text("今日はとてもいい天気なので散歩に行きましょう。", 20)
     assert "\\Nょう。" not in short_wrap
+    assert pick_speech_onset([]) == 0.0
+    assert pick_speech_onset([(0.0, 8.0), (9.0, 12.0)]) == 9.0
+    assert pick_speech_onset([(0.0, 1.0), (2.0, 4.0)]) == 0.0
+    shifted = apply_speech_onset(
+        [Word("a", 0.0, 0.4), Word("b", 0.4, 0.8), Word("c", 12.0, 12.4)],
+        12.0,
+    )
+    assert [item.word for item in shifted] == ["c"]
+    shifted = apply_speech_onset(
+        [Word("a", 0.0, 2.0), Word("b", 2.0, 4.0)],
+        12.0,
+    )
+    assert shifted[0].start == 12.0
+    packed = words_to_cues(
+        [Word("Hello", 1.0, 1.2), Word("there", 1.2, 1.5), Word("friend.", 1.5, 2.0)],
+        max_line_chars=20,
+        max_lines=1,
+    )
+    assert packed[0].original == "Hello there friend."
+    assert packed[0].start == 1.0
+    assert packed[0].end == 2.0
     print("self-test ok")
 
 
