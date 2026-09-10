@@ -5,8 +5,9 @@ Pipeline:
   1. yt-dlp downloads the video
   2. ffmpeg extracts compressed audio
   3. OpenAI ASR (whisper-1) transcribes with word timestamps
-  4. An OpenAI text model translates each cue into Traditional Chinese
-  5. ffmpeg muxes an ASS subtitle track into an MKV
+  4. Local VAD finds the first real speech so intro music is not captioned
+  5. An OpenAI text model translates each cue into Traditional Chinese
+  6. ffmpeg muxes an ASS subtitle track into an MKV
 
 Timestamped captions require whisper-1 (or gpt-4o-transcribe-diarize).
 gpt-transcribe / gpt-4o-transcribe do not return timestamps.
@@ -944,6 +945,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Pass through to yt-dlp, e.g. chrome or firefox",
     )
     parser.add_argument("--self-test", action="store_true", help="Run local helper tests and exit")
+    parser.add_argument(
+        "--no-vad",
+        action="store_true",
+        help="Do not detect speech onset; keep Whisper timestamps as-is",
+    )
     return parser.parse_args(argv)
 
 
@@ -1002,6 +1008,12 @@ def main(argv: list[str] | None = None) -> None:
         )
         if not words:
             raise SystemExit("ASR returned no words")
+        if not args.no_vad:
+            onset = detect_speech_onset(audio_path)
+            log(f"Speech onset at {onset:.2f}s")
+            words = apply_speech_onset(words, onset)
+            if not words:
+                raise SystemExit("No words remain after speech-onset alignment")
         cues = words_to_cues(words, max_line_chars)
         before = len(cues)
         cues = split_long_cues(cues, max_line_chars)
