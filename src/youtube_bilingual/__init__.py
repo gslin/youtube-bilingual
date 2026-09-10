@@ -42,6 +42,8 @@ DEFAULT_BATCH_SIZE = 12
 DEFAULT_MAX_LINE_CHARS_CJK = 40
 DEFAULT_MAX_LINE_CHARS_LATIN = 84
 MAX_LINES_PER_CUE = 2
+TRANSLATION_PAUSE_GAP = 0.55
+TRANSLATION_UNIT_LINES = 6
 VAD_SAMPLE_RATE = 16000
 VAD_FRAME_MS = 30
 VAD_MIN_RUN_MS = 270
@@ -286,6 +288,51 @@ def words_to_cues(words: list[Word], max_line_chars: int, max_lines: int = MAX_L
         batch.append(word)
         text = join_words(batch)
         if text and text[-1] in _STRONG_BREAKS and len(text) >= max_line_chars:
+            flush()
+    flush()
+    return cues
+
+
+def words_to_translation_units(
+    words: list[Word],
+    max_line_chars: int,
+    *,
+    pause_gap: float = TRANSLATION_PAUSE_GAP,
+    max_unit_lines: int = TRANSLATION_UNIT_LINES,
+) -> list[Cue]:
+    """Group words into longer units for the translator.
+
+    Split on pauses and sentence punctuation only, so the model can choose
+    display cut points by meaning. Character packing is a safety cap.
+    """
+    limit = max(max_line_chars * max_unit_lines, max_line_chars)
+    batch: list[Word] = []
+    cues: list[Cue] = []
+
+    def flush() -> None:
+        if not batch:
+            return
+        text = join_words(batch)
+        if text:
+            start = batch[0].start
+            end = max(batch[-1].end, start + 0.4)
+            cues.append(
+                Cue(id=len(cues), start=start, end=end, original=text, words=list(batch))
+            )
+        batch.clear()
+
+    for word in words:
+        if not word.word.strip():
+            continue
+        if batch:
+            gap = word.start - batch[-1].end
+            if gap >= pause_gap:
+                flush()
+            elif len(join_words(batch + [word])) > limit:
+                flush()
+        batch.append(word)
+        text = join_words(batch)
+        if text and text[-1] in _STRONG_BREAKS:
             flush()
     flush()
     return cues
@@ -1020,6 +1067,18 @@ def self_test() -> None:
     assert packed[0].original == "Hello there friend."
     assert packed[0].start == 1.0
     assert packed[0].end == 2.0
+    units = words_to_translation_units(
+        [
+            Word("Hello", 0.0, 0.3),
+            Word("there.", 0.3, 0.6),
+            Word("Next", 2.0, 2.3),
+            Word("topic.", 2.3, 2.8),
+        ],
+        max_line_chars=40,
+    )
+    assert len(units) == 2
+    assert units[0].original == "Hello there."
+    assert units[1].original == "Next topic."
     source = Cue(
         id=0,
         start=1.0,
