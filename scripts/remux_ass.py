@@ -81,6 +81,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     which_or_exit("ffmpeg")
+    which_or_exit("ffprobe")
     directory = args.directory.expanduser().resolve()
     if not directory.is_dir():
         raise SystemExit(f"Not a directory: {directory}")

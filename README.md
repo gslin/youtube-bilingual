@@ -17,7 +17,7 @@ MIT. See [LICENSE](LICENSE).
 3. OpenAI ASR (`whisper-1` by default) transcribes the audio with word timestamps.
 4. Local VAD finds the first real speech so intro music is not captioned. Words are grouped into longer translation units on pauses and sentence punctuation.
 5. An OpenAI text model (`gpt-5.6-luna` by default) runs in two phases: first it splits original speech into one-line cards by meaning, then it translates each card into Traditional Chinese. CJK defaults to 40 characters per line; other languages default to 84. Title and description are used as terminology context.
-6. `ffmpeg` muxes a soft ASS subtitle track into an MKV (video and audio are copied). ASS lines are hard-wrapped with `\\N`.
+6. `ffmpeg` muxes a soft ASS subtitle track into an MKV (video and audio are copied). Audio-only files get a black 720p video track so the subtitles have a picture to sit on. ASS lines are hard-wrapped with `\\N`.
 
 Timed captions need timestamps. Use `whisper-1` or `gpt-4o-transcribe-diarize`. `gpt-transcribe` and `gpt-4o-transcribe` do not return timestamps, so they cannot be used as the ASR model here.
 
@@ -75,7 +75,7 @@ Output (in the current directory, unless `-o` is set):
 - `<title>.mkv` — video/audio plus a default bilingual ASS track (`zho`, title `Original + zh-Hant`)
 - `<title>.ass` — the same subtitles as a sidecar file
 
-Re-run translation only (skips download, ASR, VAD, and segmentation). Requires a previous full run that kept `segmented.json` and `source.mkv`:
+Re-run translation only (skips download, ASR, VAD, and segmentation). Requires a previous full run that kept `segmented.json` and the staged `source.*` file:
 
 ```bash
 uv run youtube-bilingual --translate-only --work-dir /tmp/yt-bilingual-xxxx -l ja

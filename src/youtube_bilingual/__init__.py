@@ -8,6 +8,7 @@ Pipeline:
   4. Local VAD finds the first real speech so intro music is not captioned
   5. An OpenAI text model first splits original speech by meaning, then translates each piece
   6. ffmpeg muxes an ASS subtitle track into an MKV
+     (audio-only sources get a black 720p video track)
 
 Timestamped captions require whisper-1 (or gpt-4o-transcribe-diarize).
 gpt-transcribe / gpt-4o-transcribe do not return timestamps.
@@ -72,6 +73,10 @@ MEDIA_SUFFIXES = {
     ".aac",
     ".wma",
 }
+# Still black frame used when muxing audio-only sources so ASS has a picture.
+AUDIO_CANVAS_WIDTH = 1280
+AUDIO_CANVAS_HEIGHT = 720
+AUDIO_CANVAS_FPS = 1
 _STRONG_BREAKS = set("。．.！？!?♪…")
 _WEAK_BREAKS = set("、，,；;：: ")
 LANGUAGE_ALIASES = {
@@ -661,6 +666,48 @@ def probe_duration(path: Path) -> float:
     return float(text)
 
 
+def is_playable_video_stream(stream: dict[str, Any]) -> bool:
+    disposition = stream.get("disposition")
+    if isinstance(disposition, dict):
+        try:
+            attached = int(disposition.get("attached_pic") or 0)
+        except (TypeError, ValueError):
+            attached = 0
+        if attached:
+            return False
+    try:
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+    except (TypeError, ValueError):
+        return False
+    return width > 0 and height > 0
+
+
+def has_playable_video(path: Path) -> bool:
+    result = run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v",
+            "-show_entries",
+            "stream=width,height:stream_disposition=attached_pic",
+            "-of",
+            "json",
+            str(path),
+        ]
+    )
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Could not parse ffprobe output: {path}") from exc
+    streams = data.get("streams") if isinstance(data, dict) else None
+    if not isinstance(streams, list):
+        return False
+    return any(isinstance(stream, dict) and is_playable_video_stream(stream) for stream in streams)
+
+
 def download_video(
     url: str,
     work: Path,
@@ -721,14 +768,14 @@ def load_video_info(work: Path) -> dict[str, Any]:
 
 
 def find_source_video(work: Path) -> Path:
-    skip_suffixes = {".json", ".m4a", ".ass", ".wav"}
+    skip_suffixes = {".json", ".ass"}
     candidates = sorted(
         path
         for path in work.glob("source.*")
         if path.suffix.lower() not in skip_suffixes and ".info." not in path.name
     )
     if not candidates:
-        raise SystemExit(f"No source video in {work} (expected source.mkv from a previous run)")
+        raise SystemExit(f"No source media in {work} (expected source.* from a previous run)")
     return candidates[0]
 
 
@@ -1296,33 +1343,78 @@ def mux_cmd(
     ass_path: Path,
     output_path: Path,
     font_files: Iterable[Path] = (),
+    *,
+    audio_canvas_duration: float | None = None,
 ) -> list[str]:
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video_path),
-        "-i",
-        str(ass_path),
-        "-map",
-        "0:v:0?",
-        "-map",
-        "0:a:0?",
-        "-map",
-        "1:0",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "copy",
-        "-c:s",
-        "ass",
-        "-metadata:s:s:0",
-        "language=zho",
-        "-metadata:s:s:0",
-        "title=Original + zh-Hant",
-        "-disposition:s:0",
-        "default",
-    ]
+    cmd = ["ffmpeg", "-y"]
+    if audio_canvas_duration is None:
+        cmd.extend(
+            [
+                "-i",
+                str(video_path),
+                "-i",
+                str(ass_path),
+                "-map",
+                "0:v:0?",
+                "-map",
+                "0:a:0?",
+                "-map",
+                "1:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "copy",
+                "-c:s",
+                "ass",
+            ]
+        )
+    else:
+        duration = max(float(audio_canvas_duration), 0.1)
+        cmd.extend(
+            [
+                "-f",
+                "lavfi",
+                "-i",
+                (
+                    f"color=c=black:s={AUDIO_CANVAS_WIDTH}x{AUDIO_CANVAS_HEIGHT}"
+                    f":r={AUDIO_CANVAS_FPS}:d={duration:.3f}"
+                ),
+                "-i",
+                str(video_path),
+                "-i",
+                str(ass_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0?",
+                "-map",
+                "2:0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "stillimage",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                str(AUDIO_CANVAS_FPS),
+                "-c:a",
+                "copy",
+                "-c:s",
+                "ass",
+            ]
+        )
+    cmd.extend(
+        [
+            "-metadata:s:s:0",
+            "language=zho",
+            "-metadata:s:s:0",
+            "title=Original + zh-Hant",
+            "-disposition:s:0",
+            "default",
+        ]
+    )
     for index, font in enumerate(font_files):
         cmd.extend(
             [
@@ -1351,7 +1443,14 @@ def mux_mkv(video_path: Path, ass_path: Path, output_path: Path) -> None:
             f"{DEFAULT_ORIGINAL_FONT} / {DEFAULT_CHINESE_FONT} "
             "will not be embedded"
         )
-    run(mux_cmd(video_path, ass_path, output_path, fonts))
+    canvas_duration = None
+    if not has_playable_video(video_path):
+        canvas_duration = probe_duration(video_path)
+        log(
+            f"No playable video in {video_path.name}; "
+            f"adding a black {AUDIO_CANVAS_WIDTH}x{AUDIO_CANVAS_HEIGHT} canvas"
+        )
+    run(mux_cmd(video_path, ass_path, output_path, fonts, audio_canvas_duration=canvas_duration))
 
 
 def load_env() -> None:
@@ -1412,6 +1511,32 @@ def self_test() -> None:
     assert "filename=NotoSansCJK-Regular.ttc" in font_cmd
     assert mux_cmd(Path("v.mkv"), Path("s.ass"), Path("o.mkv"))[-1] == "o.mkv"
     assert "-attach" not in mux_cmd(Path("v.mkv"), Path("s.ass"), Path("o.mkv"))
+    copy_cmd = mux_cmd(Path("v.mkv"), Path("s.ass"), Path("o.mkv"))
+    assert copy_cmd[copy_cmd.index("-c:v") + 1] == "copy"
+    assert "0:v:0?" in copy_cmd
+    canvas_cmd = mux_cmd(
+        Path("a.mp3"),
+        Path("s.ass"),
+        Path("o.mkv"),
+        audio_canvas_duration=12.5,
+    )
+    assert canvas_cmd[-1] == "o.mkv"
+    assert "lavfi" in canvas_cmd
+    color = next(part for part in canvas_cmd if part.startswith("color="))
+    assert f"s={AUDIO_CANVAS_WIDTH}x{AUDIO_CANVAS_HEIGHT}" in color
+    assert "c=black" in color
+    assert "d=12.500" in color
+    assert canvas_cmd[canvas_cmd.index("-c:v") + 1] == "libx264"
+    assert "0:v:0" in canvas_cmd
+    assert "1:a:0?" in canvas_cmd
+    assert "2:0" in canvas_cmd
+    assert is_playable_video_stream(
+        {"width": 1280, "height": 720, "disposition": {"attached_pic": 0}}
+    )
+    assert not is_playable_video_stream(
+        {"width": 600, "height": 600, "disposition": {"attached_pic": 1}}
+    )
+    assert not is_playable_video_stream({"width": 0, "height": 0})
     noto_jp = font_file_for(DEFAULT_ORIGINAL_FONT)
     if noto_jp is not None:
         assert noto_jp.is_file()
@@ -1567,6 +1692,70 @@ def self_test() -> None:
         shutil.copy2(src_mkv, linked)
     protected = choose_output_path("clip", linked, src_mkv, extra=src_mkv)
     assert protected.name == "clip.bilingual.mkv"
+    source_work = Path(tempfile.mkdtemp())
+    (source_work / "source.m4a").write_bytes(b"x")
+    assert find_source_video(source_work).name == "source.m4a"
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        media = Path(tempfile.mkdtemp(prefix="yt-bilingual-probe-"))
+        audio = media / "silent.wav"
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=16000:cl=mono",
+                "-t",
+                "0.5",
+                "-c:a",
+                "pcm_s16le",
+                str(audio),
+            ]
+        )
+        assert not has_playable_video(audio)
+        video = media / "clip.mp4"
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x240:r=1:d=0.5",
+                "-c:v",
+                "mpeg4",
+                str(video),
+            ]
+        )
+        assert has_playable_video(video)
+        ass = media / "bilingual.ass"
+        ass.write_text(
+            build_ass(
+                [Cue(id=0, start=0.0, end=0.4, original="Hi", zh_hant="嗨")],
+                "test",
+            ),
+            encoding="utf-8",
+        )
+        out = media / "out.mkv"
+        mux_mkv(audio, ass, out)
+        assert has_playable_video(out)
+        size = run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0",
+                str(out),
+            ]
+        ).stdout.strip()
+        assert size.replace(" ", "") == f"{AUDIO_CANVAS_WIDTH},{AUDIO_CANVAS_HEIGHT}"
+        shutil.rmtree(media, ignore_errors=True)
     print("self-test ok")
 
 
