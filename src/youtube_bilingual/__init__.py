@@ -39,8 +39,8 @@ DEFAULT_CHUNK_SECONDS = 10 * 60
 DEFAULT_ASR_MODEL = "whisper-1"
 DEFAULT_TRANSLATE_MODEL = "gpt-4.1-mini"
 DEFAULT_BATCH_SIZE = 12
-DEFAULT_MAX_LINE_CHARS_CJK = 20
-DEFAULT_MAX_LINE_CHARS_LATIN = 42
+DEFAULT_MAX_LINE_CHARS_CJK = 40
+DEFAULT_MAX_LINE_CHARS_LATIN = 84
 MAX_LINES_PER_CUE = 2
 VAD_SAMPLE_RATE = 16000
 VAD_FRAME_MS = 30
@@ -1083,7 +1083,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--max-line-chars",
         type=int,
         default=0,
-        help="Max characters per subtitle line (0 = 20 for ja/zh/ko, 42 otherwise)",
+        help="Max characters per subtitle line (0 = 40 for ja/zh/ko, 84 otherwise)",
     )
     parser.add_argument("--work-dir", type=Path, help="Keep intermediate files in this directory")
     parser.add_argument("--keep-work", action="store_true", help="Do not delete the work directory")
