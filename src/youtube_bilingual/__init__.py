@@ -806,6 +806,47 @@ def transcribe_file(
     return words
 
 
+def fill_cue_ids(
+    cues: list[Cue],
+    batch_size: int,
+    request_batch: Callable[[list[Cue]], dict[int, Any]],
+) -> dict[int, Any]:
+    by_id: dict[int, Any] = {}
+    for start in range(0, len(cues), batch_size):
+        leftover = cues[start : start + batch_size]
+        attempt_size = len(leftover)
+        while leftover:
+            chunk = leftover[:attempt_size]
+            got = request_batch(chunk)
+            missing = [cue for cue in chunk if cue.id not in got]
+            by_id.update({cue.id: got[cue.id] for cue in chunk if cue.id in got})
+            unsent = leftover[attempt_size:]
+            if missing:
+                log(f"Incomplete response, retrying {len(missing)} cues")
+                leftover = missing + unsent
+                if attempt_size == 1 and len(chunk) == 1:
+                    raise SystemExit(f"Model response missing cue id {chunk[0].id}")
+                attempt_size = 1 if attempt_size <= 2 else max(1, attempt_size // 2)
+            else:
+                leftover = unsent
+                attempt_size = batch_size
+    return by_id
+
+
+def renumber_cues(cues: list[Cue]) -> list[Cue]:
+    return [
+        Cue(
+            id=index,
+            start=item.start,
+            end=item.end,
+            original=item.original,
+            zh_hant=item.zh_hant,
+            words=list(item.words),
+        )
+        for index, item in enumerate(cues)
+    ]
+
+
 def translate_cues(
     client: Any,
     cues: list[Cue],
@@ -883,41 +924,13 @@ def translate_cues(
             return {}
         return {item.id: item for item in parsed.cues}
 
+    by_id = fill_cue_ids(cues, batch_size, request_batch)
     out: list[Cue] = []
-    for start in range(0, len(cues), batch_size):
-        leftover = cues[start : start + batch_size]
-        by_id: dict[int, Any] = {}
-        attempt_size = len(leftover)
-        while leftover:
-            chunk = leftover[:attempt_size]
-            got = request_batch(chunk)
-            missing = [cue for cue in chunk if cue.id not in got]
-            by_id.update({cue.id: got[cue.id] for cue in chunk if cue.id in got})
-            unsent = leftover[attempt_size:]
-            if missing:
-                log(f"Incomplete translation, retrying {len(missing)} cues")
-                leftover = missing + unsent
-                if attempt_size == 1 and len(chunk) == 1:
-                    raise SystemExit(f"Translation response missing cue id {chunk[0].id}")
-                attempt_size = 1 if attempt_size <= 2 else max(1, attempt_size // 2)
-            else:
-                leftover = unsent
-                attempt_size = batch_size
-        for cue in cues[start : start + batch_size]:
-            item = by_id[cue.id]
-            pieces = [(piece.original, piece.zh_hant) for piece in item.pieces]
-            out.extend(expand_translated_pieces(cue, pieces))
-    return [
-        Cue(
-            id=index,
-            start=item.start,
-            end=item.end,
-            original=item.original,
-            zh_hant=item.zh_hant,
-            words=list(item.words),
-        )
-        for index, item in enumerate(out)
-    ]
+    for cue in cues:
+        item = by_id[cue.id]
+        pieces = [(piece.original, piece.zh_hant) for piece in item.pieces]
+        out.extend(expand_translated_pieces(cue, pieces))
+    return renumber_cues(out)
 
 
 def build_ass(cues: Iterable[Cue], title: str, max_line_chars: int = DEFAULT_MAX_LINE_CHARS_LATIN) -> str:
