@@ -6,6 +6,10 @@ The subtitle track shows the original line above the Traditional Chinese line.
 
 This repository was largely generated with LLM assistance.
 
+## License
+
+MIT. See [LICENSE](LICENSE).
+
 ## Pipeline
 
 1. `yt-dlp` downloads the video, or a local video/audio file is used as-is.
