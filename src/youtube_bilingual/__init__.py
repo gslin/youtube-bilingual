@@ -6,7 +6,7 @@ Pipeline:
   2. ffmpeg extracts compressed audio
   3. OpenAI ASR (whisper-1) transcribes with word timestamps
   4. Local VAD finds the first real speech so intro music is not captioned
-  5. An OpenAI text model translates cues and splits them so only one short original line and one Chinese line show at a time
+  5. An OpenAI text model first splits original speech by meaning, then translates each piece
   6. ffmpeg muxes an ASS subtitle track into an MKV
 
 Timestamped captions require whisper-1 (or gpt-4o-transcribe-diarize).
@@ -930,15 +930,12 @@ def translate_cues(
     description: str,
     max_line_chars: int,
 ) -> list[Cue]:
-    from pydantic import BaseModel, Field
-
-    class SubtitlePiece(BaseModel):
-        original: str
-        zh_hant: str
+    from pydantic import BaseModel
 
     class TranslatedCue(BaseModel):
         id: int
-        pieces: list[SubtitlePiece] = Field(min_length=1)
+        original: str
+        zh_hant: str
 
     class TranslationBatch(BaseModel):
         cues: list[TranslatedCue]
@@ -948,18 +945,14 @@ def translate_cues(
         "description": clip_text(description, MAX_DESCRIPTION_CHARS),
     }
     instructions = (
-        "You convert ASR cues into bilingual subtitles that fit on one TV-sized screen.\n"
-        "For each input cue, return one or more pieces in speaking order.\n"
-        "Each piece is shown by itself: one original line above one Traditional Chinese line.\n"
-        f"Hard limits for every piece:\n"
-        f"- original: at most {max_line_chars} characters, a single line, no newline.\n"
-        f"- zh_hant: at most {max_line_chars} characters, Taiwan Traditional Chinese "
-        "(zh-Hant-TW), a single line, no newline.\n"
-        "Split at natural phrase boundaries when the source is too long to fit.\n"
-        "Cover the whole source text; do not drop spoken words or add extra meaning.\n"
-        "Keep original wording except for obvious ASR typos, spacing, and punctuation.\n"
-        "If a cue already fits, return exactly one piece.\n"
-        "Do not merge different input ids. Return every input id once, same order.\n"
+        "You translate already-split subtitle cards into Traditional Chinese.\n"
+        "Do not merge or split cards. Return the same ids, same count, same order.\n"
+        "For each cue:\n"
+        "- original: keep the spoken wording. Only fix obvious ASR typos, spacing, "
+        "and punctuation.\n"
+        "- zh_hant: natural Traditional Chinese used in Taiwan (zh-Hant-TW).\n"
+        f"- zh_hant must be at most {max_line_chars} characters, a single line, no newline.\n"
+        "If the Chinese would overflow, tighten the wording; do not add a second line.\n"
         "Do not add notes, brackets, or speaker labels unless they are in the source.\n"
         "Keep well-known names, brands, and code in the original script when that is natural.\n"
         "The user message includes the YouTube title and description; use them as "
@@ -970,10 +963,7 @@ def translate_cues(
     def request_batch(chunk: list[Cue]) -> dict[int, Any]:
         payload = {
             "video": video_meta,
-            "limits": {
-                "max_chars_per_line": max_line_chars,
-                "lines_per_piece": 1,
-            },
+            "limits": {"max_chars_per_line": max_line_chars},
             "cues": [{"id": cue.id, "text": cue.original} for cue in chunk],
         }
         log(
@@ -1000,9 +990,17 @@ def translate_cues(
     out: list[Cue] = []
     for cue in cues:
         item = by_id[cue.id]
-        pieces = [(piece.original, piece.zh_hant) for piece in item.pieces]
-        out.extend(expand_translated_pieces(cue, pieces))
-    return renumber_cues(out)
+        out.append(
+            Cue(
+                id=cue.id,
+                start=cue.start,
+                end=cue.end,
+                original=(item.original or cue.original).strip(),
+                zh_hant=item.zh_hant.strip(),
+                words=list(cue.words),
+            )
+        )
+    return out
 
 
 def build_ass(cues: Iterable[Cue], title: str, max_line_chars: int = DEFAULT_MAX_LINE_CHARS_LATIN) -> str:
@@ -1306,15 +1304,24 @@ def main(argv: list[str] | None = None) -> None:
             words = apply_speech_onset(words, onset)
             if not words:
                 raise SystemExit("No words remain after speech-onset alignment")
-        cues = words_to_cues(words, max_line_chars)
-        before = len(cues)
-        cues = split_long_cues(cues, max_line_chars)
-        if len(cues) != before:
-            log(f"Split {before} ASR cues into {len(cues)} for {max_line_chars} chars/line")
+        cues = words_to_translation_units(words, max_line_chars)
         if not cues:
             raise SystemExit("ASR returned no subtitle cues")
+        log(f"Grouped {len(words)} words into {len(cues)} translation units")
         write_json(work / "transcript.json", [asdict(cue) for cue in cues])
         before = len(cues)
+        cues = segment_cues(
+            client,
+            cues,
+            model=args.model,
+            language=language,
+            batch_size=args.batch_size,
+            title=video.title,
+            max_line_chars=max_line_chars,
+        )
+        if len(cues) != before:
+            log(f"Segmented {before} units into {len(cues)} subtitle cards")
+        write_json(work / "segmented.json", [asdict(cue) for cue in cues])
         cues = translate_cues(
             client,
             cues,
@@ -1325,8 +1332,6 @@ def main(argv: list[str] | None = None) -> None:
             description=video.description,
             max_line_chars=max_line_chars,
         )
-        if len(cues) != before:
-            log(f"Translation split {before} cues into {len(cues)} screen-sized pieces")
         write_json(work / "bilingual.json", [asdict(cue) for cue in cues])
         ass_text = build_ass(cues, video.title, max_line_chars=max_line_chars)
         ass_path = work / "bilingual.ass"
