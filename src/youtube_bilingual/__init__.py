@@ -1216,7 +1216,7 @@ def build_ass(cues: Iterable[Cue], title: str, max_line_chars: int = DEFAULT_MAX
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
         f"Style: Original,{DEFAULT_ORIGINAL_FONT},42,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
-        "0,0,0,0,100,100,0,0,1,2,0,2,60,60,190,1",
+        "0,0,0,0,100,100,0,0,1,2,0,2,60,60,40,1",
         f"Style: Chinese,{DEFAULT_CHINESE_FONT},52,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
         "0,0,0,0,100,100,0,0,1,2.4,0,2,60,60,40,1",
         "",
@@ -1228,11 +1228,15 @@ def build_ass(cues: Iterable[Cue], title: str, max_line_chars: int = DEFAULT_MAX
         end = to_ass_time(cue.end)
         original = wrap_ass_text(cue.original, max_line_chars)
         zh = wrap_ass_text(cue.zh_hant, max_line_chars)
-        lines.append(
-            f"Dialogue: 0,{start},{end},Original,,0,0,0,,{original}"
-        )
         if zh:
-            lines.append(f"Dialogue: 0,{start},{end},Chinese,,0,0,0,,{zh}")
+            lines.append(
+                f"Dialogue: 0,{start},{end},Chinese,,0,0,0,,"
+                f"{{\\rOriginal}}{original}\\N\\N{{\\rChinese}}{zh}"
+            )
+        else:
+            lines.append(
+                f"Dialogue: 0,{start},{end},Original,,0,0,0,,{original}"
+            )
     lines.append("")
     return "\n".join(lines)
 
@@ -1389,8 +1393,10 @@ def self_test() -> None:
     ass = build_ass(cues, "test")
     assert f"Style: Original,{DEFAULT_ORIGINAL_FONT}," in ass
     assert f"Style: Chinese,{DEFAULT_CHINESE_FONT}," in ass
-    assert "Dialogue: 0,0:00:01.00,0:00:03.50,Original,,0,0,0,,Hello, world." in ass
-    assert "Dialogue: 0,0:00:01.00,0:00:03.50,Chinese,,0,0,0,,你好，世界。" in ass
+    assert (
+        "Dialogue: 0,0:00:01.00,0:00:03.50,Chinese,,0,0,0,,"
+        "{\\rOriginal}Hello, world.\\N\\N{\\rChinese}你好，世界。"
+    ) in ass
     assert font_file_for("DefinitelyNotAFontXYZ-youtube-bilingual") is None
     font_cmd = mux_cmd(
         Path("v.mkv"),
@@ -1411,6 +1417,11 @@ def self_test() -> None:
         assert noto_jp.is_file()
         embedded = subtitle_font_files()
         assert noto_jp.resolve() in {path.resolve() for path in embedded}
+    original_only = build_ass(
+        [Cue(id=0, start=1.0, end=3.5, original="Hello, world.")],
+        "test",
+    )
+    assert "Dialogue: 0,0:00:01.00,0:00:03.50,Original,,0,0,0,,Hello, world." in original_only
     assert clip_text("short", 10) == "short"
     assert clip_text("abcdefghij", 8) == "abcdefgh\n..."
     assert split_text("你好。世界。測試", 6) == ["你好。世界。", "測試"]
