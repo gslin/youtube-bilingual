@@ -847,6 +847,78 @@ def renumber_cues(cues: list[Cue]) -> list[Cue]:
     ]
 
 
+def segment_cues(
+    client: Any,
+    cues: list[Cue],
+    *,
+    model: str,
+    language: str,
+    batch_size: int,
+    title: str,
+    max_line_chars: int,
+) -> list[Cue]:
+    from pydantic import BaseModel, Field
+
+    class SegmentedCue(BaseModel):
+        id: int
+        pieces: list[str] = Field(min_length=1)
+
+    class SegmentBatch(BaseModel):
+        cues: list[SegmentedCue]
+
+    instructions = (
+        "You split original-language speech into subtitle cards. Do not translate.\n"
+        "Each input cue may contain more than one spoken clause. You choose the "
+        "cut points by meaning: one piece = one breath, clause, or complete thought "
+        "that a viewer can read at a glance.\n"
+        "Do not split in the middle of a name, set phrase, or tightly bound modifier.\n"
+        "Length is a hard maximum, not a target. Prefer a natural shorter break "
+        "over filling the character budget.\n"
+        f"Each piece must be at most {max_line_chars} characters, a single line, no newline.\n"
+        "Cover the whole source text in speaking order; do not drop spoken words "
+        "or add extra meaning.\n"
+        "Keep original wording except for obvious ASR typos, spacing, and punctuation.\n"
+        "If a cue is already one short thought, return exactly one piece.\n"
+        "Do not merge different input ids. Return every input id once, same order.\n"
+        "The video title is provided so you do not split names or titles.\n"
+        f"Source spoken language code: {language}."
+    )
+
+    def request_batch(chunk: list[Cue]) -> dict[int, Any]:
+        payload = {
+            "title": title.strip(),
+            "limits": {"max_chars_per_piece": max_line_chars},
+            "cues": [{"id": cue.id, "text": cue.original} for cue in chunk],
+        }
+        log(
+            f"Segmenting cues {chunk[0].id + 1}-{chunk[-1].id + 1} "
+            f"({len(chunk)} items) / {len(cues)}"
+        )
+
+        def _parse() -> Any:
+            return client.responses.parse(
+                model=model,
+                input=[
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                text_format=SegmentBatch,
+            )
+
+        parsed = openai_call(_parse).output_parsed
+        if parsed is None:
+            return {}
+        return {item.id: item for item in parsed.cues}
+
+    by_id = fill_cue_ids(cues, batch_size, request_batch)
+    out: list[Cue] = []
+    for cue in cues:
+        item = by_id[cue.id]
+        pieces = [(piece, "") for piece in item.pieces if str(piece).strip()]
+        out.extend(expand_translated_pieces(cue, pieces))
+    return renumber_cues(out)
+
+
 def translate_cues(
     client: Any,
     cues: list[Cue],
