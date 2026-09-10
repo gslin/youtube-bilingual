@@ -4,6 +4,8 @@ Download a YouTube video or read a local video/audio file, transcribe the spoken
 
 The subtitle track shows the original line above the Traditional Chinese line.
 
+This repository was largely generated with LLM assistance.
+
 ## Pipeline
 
 1. `yt-dlp` downloads the video, or a local video/audio file is used as-is.
