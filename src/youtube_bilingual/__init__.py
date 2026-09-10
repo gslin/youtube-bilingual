@@ -806,18 +806,19 @@ def translate_cues(
         f"Source spoken language code: {language}."
     )
 
-    out: list[Cue] = []
-    for start in range(0, len(cues), batch_size):
-        batch = cues[start : start + batch_size]
+    def request_batch(chunk: list[Cue]) -> dict[int, Any]:
         payload = {
             "video": video_meta,
             "limits": {
                 "max_chars_per_line": max_line_chars,
                 "lines_per_piece": 1,
             },
-            "cues": [{"id": cue.id, "text": cue.original} for cue in batch],
+            "cues": [{"id": cue.id, "text": cue.original} for cue in chunk],
         }
-        log(f"Translating cues {batch[0].id + 1}-{batch[-1].id + 1} / {len(cues)}")
+        log(
+            f"Translating cues {chunk[0].id + 1}-{chunk[-1].id + 1} "
+            f"({len(chunk)} items) / {len(cues)}"
+        )
 
         def _parse() -> Any:
             return client.responses.parse(
@@ -831,12 +832,30 @@ def translate_cues(
 
         parsed = openai_call(_parse).output_parsed
         if parsed is None:
-            raise SystemExit("Translation model returned no structured output")
-        by_id = {item.id: item for item in parsed.cues}
-        missing = [cue.id for cue in batch if cue.id not in by_id]
-        if missing:
-            raise SystemExit(f"Translation response missing cue ids: {missing[:10]}")
-        for cue in batch:
+            return {}
+        return {item.id: item for item in parsed.cues}
+
+    out: list[Cue] = []
+    for start in range(0, len(cues), batch_size):
+        leftover = cues[start : start + batch_size]
+        by_id: dict[int, Any] = {}
+        attempt_size = len(leftover)
+        while leftover:
+            chunk = leftover[:attempt_size]
+            got = request_batch(chunk)
+            missing = [cue for cue in chunk if cue.id not in got]
+            by_id.update({cue.id: got[cue.id] for cue in chunk if cue.id in got})
+            unsent = leftover[attempt_size:]
+            if missing:
+                log(f"Incomplete translation, retrying {len(missing)} cues")
+                leftover = missing + unsent
+                if attempt_size == 1 and len(chunk) == 1:
+                    raise SystemExit(f"Translation response missing cue id {chunk[0].id}")
+                attempt_size = 1 if attempt_size <= 2 else max(1, attempt_size // 2)
+            else:
+                leftover = unsent
+                attempt_size = batch_size
+        for cue in cues[start : start + batch_size]:
             item = by_id[cue.id]
             pieces = [(piece.original, piece.zh_hant) for piece in item.pieces]
             out.extend(expand_translated_pieces(cue, pieces))
