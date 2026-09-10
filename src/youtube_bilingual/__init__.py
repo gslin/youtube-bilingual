@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, TypeVar
 
 MAX_ASR_BYTES = 24 * 1024 * 1024
+MAX_DESCRIPTION_CHARS = 4000
 DEFAULT_CHUNK_SECONDS = 10 * 60
 DEFAULT_ASR_MODEL = "whisper-1"
 DEFAULT_TRANSLATE_MODEL = "gpt-4.1-mini"
@@ -110,6 +111,13 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'[<>:"/\\|?*]', "_", name)
     name = re.sub(r"\s+", " ", name).strip(" .")
     return (name[:120] or "video")
+
+
+def clip_text(text: str, limit: int) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n..."
 
 
 def normalize_language(value: str) -> str:
@@ -394,6 +402,8 @@ def translate_cues(
     model: str,
     language: str,
     batch_size: int,
+    title: str,
+    description: str,
 ) -> None:
     from pydantic import BaseModel
 
@@ -405,6 +415,10 @@ def translate_cues(
     class TranslationBatch(BaseModel):
         cues: list[TranslatedCue]
 
+    video_meta = {
+        "title": title.strip(),
+        "description": clip_text(description, MAX_DESCRIPTION_CHARS),
+    }
     instructions = (
         "You convert subtitle cues into bilingual captions.\n"
         "For each cue:\n"
@@ -417,12 +431,17 @@ def translate_cues(
         "- Do not add notes, brackets, or speaker labels unless they are in the source.\n"
         "- Keep well-known names, brands, and code in the original script when that is natural.\n"
         "- Use Traditional Chinese punctuation for zh_hant.\n"
+        "- The user message includes the YouTube title and description. Use them as "
+        "terminology context: names, product terms, place names, and other proper "
+        "nouns should follow those metadata when they appear in the cues. Keep that "
+        "wording consistent across cues.\n"
         f"- Source spoken language code: {language}."
     )
 
     for start in range(0, len(cues), batch_size):
         batch = cues[start : start + batch_size]
         payload = {
+            "video": video_meta,
             "cues": [{"id": cue.id, "text": cue.original} for cue in batch],
         }
         log(f"Translating cues {batch[0].id + 1}-{batch[-1].id + 1} / {len(cues)}")
@@ -559,6 +578,8 @@ def self_test() -> None:
     ass = build_ass(cues, "test")
     assert "Dialogue: 0,0:00:01.00,0:00:03.50,Original,,0,0,0,,Hello, world." in ass
     assert "Dialogue: 0,0:00:01.00,0:00:03.50,Chinese,,0,0,0,,你好，世界。" in ass
+    assert clip_text("short", 10) == "short"
+    assert clip_text("abcdefghij", 8) == "abcdefgh\n..."
     print("self-test ok")
 
 
@@ -663,6 +684,8 @@ def main(argv: list[str] | None = None) -> None:
             model=args.model,
             language=language,
             batch_size=args.batch_size,
+            title=video.title,
+            description=video.description,
         )
         write_json(work / "bilingual.json", [asdict(cue) for cue in cues])
         ass_text = build_ass(cues, video.title)
