@@ -18,17 +18,11 @@ OpenAI file transcription accepts uploads up to 25 MB. Longer audio is split int
 
 ## Requirements
 
-System tools:
+- `uv` (provides `uv` and `uvx`)
+- `ffmpeg` and `ffprobe`
+- Python 3.10+ (installed automatically by uv if needed)
 
-- `ffmpeg`
-- `ffprobe`
-- `yt-dlp`
-
-Python 3.10+ and:
-
-```bash
-pip install -r requirements.txt
-```
+`yt-dlp` is a Python dependency and is installed by uv.
 
 ## Setup
 
@@ -46,8 +40,22 @@ The script loads `.env` from the current working directory, then from this direc
 
 ## Usage
 
+From this directory:
+
 ```bash
-python3 youtube_bilingual_mkv.py 'https://www.youtube.com/watch?v=XXXX' -l ja
+uv run youtube-bilingual 'https://www.youtube.com/watch?v=XXXX' -l ja
+```
+
+Without installing into the current environment:
+
+```bash
+uvx --from . youtube-bilingual 'https://www.youtube.com/watch?v=XXXX' -l ja
+```
+
+From a git remote:
+
+```bash
+uvx --from git+https://example.com/youtube-bilingual.git youtube-bilingual 'https://www.youtube.com/watch?v=XXXX' -l ja
 ```
 
 `-l` is the spoken language as an ISO-639-1 code (`en`, `ja`, `ko`, `zh`, ...).
@@ -60,7 +68,7 @@ Output (in the current directory, unless `-o` is set):
 Helper check that does not call the network:
 
 ```bash
-python3 youtube_bilingual_mkv.py --self-test
+uv run youtube-bilingual --self-test
 ```
 
 ## Options
@@ -82,5 +90,5 @@ python3 youtube_bilingual_mkv.py --self-test
 Age-gated or login-walled videos:
 
 ```bash
-python3 youtube_bilingual_mkv.py 'https://www.youtube.com/watch?v=XXXX' -l en --cookies-from-browser chrome
+uv run youtube-bilingual 'https://www.youtube.com/watch?v=XXXX' -l en --cookies-from-browser chrome
 ```
