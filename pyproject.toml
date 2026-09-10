@@ -1,7 +1,7 @@
 [project]
 name = "youtube-bilingual"
 version = "0.1.0"
-description = "Download a YouTube video and mux bilingual original + Traditional Chinese subtitles into an MKV."
+description = "Download a YouTube video or read a local file, then mux bilingual original + Traditional Chinese subtitles into an MKV."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

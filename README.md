@@ -1,12 +1,12 @@
 # youtube-bilingual
 
-Download a YouTube video, transcribe the spoken audio with OpenAI ASR, translate each cue into Traditional Chinese (Taiwan), and mux bilingual subtitles into an `.mkv`.
+Download a YouTube video or read a local video/audio file, transcribe the spoken audio with OpenAI ASR, translate each cue into Traditional Chinese (Taiwan), and mux bilingual subtitles into an `.mkv`.
 
 The subtitle track shows the original line above the Traditional Chinese line.
 
 ## Pipeline
 
-1. `yt-dlp` downloads the video.
+1. `yt-dlp` downloads the video, or a local video/audio file is used as-is.
 2. `ffmpeg` extracts 16 kHz mono AAC audio.
 3. OpenAI ASR (`whisper-1` by default) transcribes the audio with word timestamps.
 4. Local VAD finds the first real speech so intro music is not captioned. Words are grouped into longer translation units on pauses and sentence punctuation.
@@ -45,6 +45,7 @@ From this directory:
 
 ```bash
 uv run youtube-bilingual 'https://www.youtube.com/watch?v=XXXX' -l ja
+uv run youtube-bilingual ./talk.mp4 -l ja
 ```
 
 Without installing into the current environment:
@@ -58,6 +59,8 @@ From a git remote:
 ```bash
 uvx --from git+https://example.com/youtube-bilingual.git youtube-bilingual 'https://www.youtube.com/watch?v=XXXX' -l ja
 ```
+
+The first argument is a YouTube URL or a local video/audio file. Local files skip `yt-dlp`. If the default output path would overwrite that input file, the MKV is written as `<title>.bilingual.mkv`.
 
 `-l` is the spoken language as an ISO-639-1 code (`en`, `ja`, `ko`, `zh`, ...).
 

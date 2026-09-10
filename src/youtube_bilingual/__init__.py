@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Download a YouTube video and mux bilingual (original + zh-Hant) subtitles.
+"""Download a YouTube video or read a local file, then mux bilingual subtitles.
 
 Pipeline:
-  1. yt-dlp downloads the video
+  1. yt-dlp downloads the video, or a local video/audio file is used as-is
   2. ffmpeg extracts compressed audio
   3. OpenAI ASR (whisper-1) transcribes with word timestamps
   4. Local VAD finds the first real speech so intro music is not captioned
@@ -51,6 +51,24 @@ VAD_FRAME_MS = 30
 VAD_MIN_RUN_MS = 270
 TIMESTAMP_ASR_MODELS = ("whisper-1", "gpt-4o-transcribe-diarize")
 CJK_LANGUAGES = {"zh", "ja", "ko"}
+MEDIA_SUFFIXES = {
+    ".mkv",
+    ".mp4",
+    ".webm",
+    ".mov",
+    ".avi",
+    ".m4v",
+    ".ts",
+    ".m2ts",
+    ".mp3",
+    ".m4a",
+    ".wav",
+    ".flac",
+    ".ogg",
+    ".opus",
+    ".aac",
+    ".wma",
+}
 _STRONG_BREAKS = set("。．.！？!?♪…")
 _WEAK_BREAKS = set("、，,；;：: ")
 LANGUAGE_ALIASES = {
@@ -102,6 +120,7 @@ class VideoSource:
     path: Path
     title: str
     description: str = ""
+    input_path: Path | None = None
 
 
 def log(message: str) -> None:
@@ -128,6 +147,70 @@ def run(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProce
     if result.returncode != 0:
         raise SystemExit(f"Command failed ({result.returncode}): {' '.join(cmd)}")
     return result
+
+
+def looks_like_url(value: str) -> bool:
+    return bool(re.match(r"(?i)^(https?://|www\.)", value.strip()))
+
+
+def local_media_path(value: str) -> Path | None:
+    if looks_like_url(value):
+        return None
+    path = Path(value).expanduser()
+    if path.is_file():
+        return path.resolve()
+    if path.exists():
+        raise SystemExit(f"Not a file: {path}")
+    explicit = path.is_absolute() or value.startswith(("./", "../", "~"))
+    if explicit or path.suffix.lower() in MEDIA_SUFFIXES:
+        raise SystemExit(f"File not found: {path}")
+    return None
+
+
+def stage_local_source(path: Path, work: Path) -> VideoSource:
+    path = path.resolve()
+    suffix = path.suffix.lower() or ".mkv"
+    dest = work / f"source{suffix}"
+    if dest.resolve() != path:
+        if dest.exists() or dest.is_symlink():
+            dest.unlink()
+        try:
+            os.link(path, dest)
+        except OSError:
+            shutil.copy2(path, dest)
+    title = path.stem.strip() or "video"
+    return VideoSource(path=dest, title=title, description="", input_path=path)
+
+
+def paths_collide(left: Path, right: Path) -> bool:
+    try:
+        if left.resolve() == right.resolve():
+            return True
+    except OSError:
+        pass
+    try:
+        return left.exists() and right.exists() and left.samefile(right)
+    except OSError:
+        return False
+
+
+def choose_output_path(
+    title: str,
+    source: Path,
+    output: Path | None,
+    *,
+    extra: Path | None = None,
+) -> Path:
+    if output is None:
+        output = Path(f"{sanitize_filename(title)}.mkv")
+    if output.suffix.lower() != ".mkv":
+        output = output.with_suffix(".mkv")
+    for protected in (source, extra):
+        if protected is not None and paths_collide(output, protected):
+            output = output.with_name(f"{output.stem}.bilingual.mkv")
+            log(f"Output would overwrite the source; writing {output}")
+            break
+    return output
 
 
 def sanitize_filename(name: str) -> str:
@@ -709,10 +792,12 @@ def write_bilingual_mkv(
     ass_text = build_ass(cues, video.title, max_line_chars=max_line_chars)
     ass_path = work / "bilingual.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
-    if output is None:
-        output = Path(f"{sanitize_filename(video.title)}.mkv")
-    if output.suffix.lower() != ".mkv":
-        output = output.with_suffix(".mkv")
+    output = choose_output_path(
+        video.title,
+        video.path,
+        output,
+        extra=video.input_path,
+    )
     mux_mkv(video.path, ass_path, output)
     sidecar = output.with_suffix(".ass")
     sidecar.write_text(ass_text, encoding="utf-8")
@@ -1160,7 +1245,7 @@ def mux_mkv(video_path: Path, ass_path: Path, output_path: Path) -> None:
             "-i",
             str(ass_path),
             "-map",
-            "0:v:0",
+            "0:v:0?",
             "-map",
             "0:a:0?",
             "-map",
@@ -1335,17 +1420,48 @@ def self_test() -> None:
 
     filled = fill_cue_ids(many[:4], 4, incomplete_batch, jobs=2)
     assert set(filled) == {0, 1, 2, 3}
+    assert looks_like_url("https://www.youtube.com/watch?v=XXXX")
+    assert looks_like_url("http://youtu.be/XXXX")
+    assert looks_like_url("www.youtube.com/watch?v=XXXX")
+    assert not looks_like_url("clip.mp4")
+    assert local_media_path("https://www.youtube.com/watch?v=XXXX") is None
+    assert local_media_path("dQw4w9wgGc") is None
+    missing_media = False
+    try:
+        local_media_path("definitely-missing-xyz.mp4")
+    except SystemExit:
+        missing_media = True
+    assert missing_media
+    src_dir = Path(tempfile.mkdtemp())
+    src = src_dir / "clip.mp4"
+    src.write_bytes(b"x")
+    assert local_media_path(str(src)) == src.resolve()
+    staged = stage_local_source(src, Path(tempfile.mkdtemp()))
+    assert staged.path.name == "source.mp4"
+    assert staged.title == "clip"
+    assert staged.path.is_file()
+    src_mkv = src_dir / "clip.mkv"
+    src_mkv.write_bytes(b"x")
+    same = choose_output_path("clip", src_mkv, src_mkv)
+    assert same.name == "clip.bilingual.mkv"
+    linked = Path(tempfile.mkdtemp()) / "source.mkv"
+    try:
+        os.link(src_mkv, linked)
+    except OSError:
+        shutil.copy2(src_mkv, linked)
+    protected = choose_output_path("clip", linked, src_mkv, extra=src_mkv)
+    assert protected.name == "clip.bilingual.mkv"
     print("self-test ok")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Download a YouTube URL with yt-dlp, transcribe it with OpenAI ASR, "
-            "and mux original + Traditional Chinese subtitles into an MKV."
+            "Download a YouTube URL or read a local file, transcribe it with "
+            "OpenAI ASR, and mux original + Traditional Chinese subtitles into an MKV."
         )
     )
-    parser.add_argument("url", nargs="?", help="YouTube URL")
+    parser.add_argument("source", nargs="?", help="YouTube URL or local video/audio file")
     parser.add_argument(
         "-l",
         "--language",
@@ -1417,8 +1533,8 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit("--translate-only requires --work-dir from a previous full run")
         if not args.language:
             raise SystemExit("--language is required")
-    elif not args.url or not args.language:
-        raise SystemExit("url and --language are required (or pass --self-test / --translate-only)")
+    elif not args.source or not args.language:
+        raise SystemExit("source and --language are required (or pass --self-test / --translate-only)")
     if args.asr_model not in TIMESTAMP_ASR_MODELS:
         raise SystemExit(
             "Subtitles need timestamps. Use --asr-model whisper-1 "
@@ -1434,8 +1550,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.max_line_chars < 0:
         raise SystemExit("--max-line-chars must be >= 0")
 
+    local_path = None
     if not args.translate_only:
-        which_or_exit("yt-dlp")
+        local_path = local_media_path(args.source)
+        if local_path is None:
+            which_or_exit("yt-dlp")
         which_or_exit("ffprobe")
     which_or_exit("ffmpeg")
     language = normalize_language(args.language)
@@ -1476,13 +1595,17 @@ def main(argv: list[str] | None = None) -> None:
                 max_line_chars=max_line_chars,
             )
             return
-        video = download_video(
-            args.url,
-            work,
-            cookies=args.cookies,
-            cookies_from_browser=args.cookies_from_browser,
-        )
-        log(f"Downloaded: {video.title}")
+        if local_path is not None:
+            video = stage_local_source(local_path, work)
+            log(f"Local file: {video.path}")
+        else:
+            video = download_video(
+                args.source,
+                work,
+                cookies=args.cookies,
+                cookies_from_browser=args.cookies_from_browser,
+            )
+            log(f"Downloaded: {video.title}")
         audio_path = work / "audio.m4a"
         extract_audio(video.path, audio_path)
         chunks = split_audio(audio_path, work / "chunks", args.chunk_seconds)
