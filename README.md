@@ -80,7 +80,7 @@ uv run youtube-bilingual --self-test
 | `-o`, `--output` | `<title>.mkv` | Output MKV path |
 | `--asr-model` | `whisper-1` | ASR model with timestamps (`whisper-1` or `gpt-4o-transcribe-diarize`) |
 | `--model` | `gpt-4.1-mini` | OpenAI model used for Traditional Chinese lines |
-| `--batch-size` | `40` | Cues per translation request |
+| `--batch-size` | `12` | Cues per translation request |
 | `--chunk-seconds` | `600` | Audio chunk length when the file exceeds the 25 MB ASR limit |
 | `--max-line-chars` | auto | Max characters per subtitle line (`20` for `ja`/`zh`/`ko`, `42` otherwise) |
 | `--work-dir` | temp dir | Keep intermediate files in this directory |

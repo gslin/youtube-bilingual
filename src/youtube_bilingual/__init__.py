@@ -38,6 +38,7 @@ MAX_DESCRIPTION_CHARS = 4000
 DEFAULT_CHUNK_SECONDS = 10 * 60
 DEFAULT_ASR_MODEL = "whisper-1"
 DEFAULT_TRANSLATE_MODEL = "gpt-4.1-mini"
+DEFAULT_BATCH_SIZE = 12
 DEFAULT_MAX_LINE_CHARS_CJK = 20
 DEFAULT_MAX_LINE_CHARS_LATIN = 42
 MAX_LINES_PER_CUE = 2
@@ -1066,7 +1067,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_TRANSLATE_MODEL,
         help="OpenAI model used to produce Traditional Chinese lines",
     )
-    parser.add_argument("--batch-size", type=int, default=40, help="Cues per translation request")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help="Cues per translation request",
+    )
     parser.add_argument(
         "--chunk-seconds",
         type=int,
