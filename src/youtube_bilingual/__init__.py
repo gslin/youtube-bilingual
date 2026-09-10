@@ -13,9 +13,8 @@ gpt-transcribe / gpt-4o-transcribe do not return timestamps.
 
 Requires:
   - ffmpeg / ffprobe
-  - yt-dlp
   - OPENAI_API_KEY in .env (or the environment)
-  - pip install -r requirements.txt
+  - uv run youtube-bilingual ...  (or uvx --from . youtube-bilingual ...)
 """
 
 from __future__ import annotations
@@ -500,11 +499,14 @@ def mux_mkv(video_path: Path, ass_path: Path, output_path: Path) -> None:
 def load_env() -> None:
     from dotenv import load_dotenv
 
-    cwd_env = Path.cwd() / ".env"
-    script_env = Path(__file__).resolve().parent / ".env"
-    load_dotenv(cwd_env)
-    if script_env.resolve() != cwd_env.resolve():
-        load_dotenv(script_env)
+    load_dotenv(Path.cwd() / ".env")
+    here = Path(__file__).resolve().parent
+    for directory in [here, *here.parents]:
+        env_path = directory / ".env"
+        if env_path.is_file():
+            load_dotenv(env_path)
+        if (directory / "pyproject.toml").is_file():
+            break
 
 
 def get_client() -> Any:
