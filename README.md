@@ -87,6 +87,7 @@ uv run youtube-bilingual --self-test
 | `--asr-model` | `whisper-1` | ASR model with timestamps (`whisper-1` or `gpt-4o-transcribe-diarize`) |
 | `--model` | `gpt-5.6-luna` | OpenAI model used to split original lines and translate them |
 | `--batch-size` | `12` | Cues per translation request |
+| `--jobs` | `4` | Concurrent segment/translate API requests |
 | `--chunk-seconds` | `600` | Audio chunk length when the file exceeds the 25 MB ASR limit |
 | `--max-line-chars` | auto | Max characters per subtitle line (`40` for `ja`/`zh`/`ko`, `84` otherwise) |
 | `--work-dir` | temp dir | Keep intermediate files in this directory |

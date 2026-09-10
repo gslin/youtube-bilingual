@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypeVar
@@ -39,6 +40,7 @@ DEFAULT_CHUNK_SECONDS = 10 * 60
 DEFAULT_ASR_MODEL = "whisper-1"
 DEFAULT_TRANSLATE_MODEL = "gpt-5.6-luna"
 DEFAULT_BATCH_SIZE = 12
+DEFAULT_JOBS = 4
 DEFAULT_MAX_LINE_CHARS_CJK = 40
 DEFAULT_MAX_LINE_CHARS_LATIN = 84
 MAX_LINES_PER_CUE = 2
@@ -892,30 +894,49 @@ def transcribe_file(
     return words
 
 
+def map_cue_batches(
+    chunks: list[list[Cue]],
+    request_batch: Callable[[list[Cue]], dict[int, Any]],
+    jobs: int,
+) -> list[dict[int, Any]]:
+    if not chunks:
+        return []
+    if jobs <= 1 or len(chunks) == 1:
+        return [request_batch(chunk) for chunk in chunks]
+    workers = min(jobs, len(chunks))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(request_batch, chunks))
+
+
 def fill_cue_ids(
     cues: list[Cue],
     batch_size: int,
     request_batch: Callable[[list[Cue]], dict[int, Any]],
+    jobs: int = 1,
 ) -> dict[int, Any]:
     by_id: dict[int, Any] = {}
-    for start in range(0, len(cues), batch_size):
-        leftover = cues[start : start + batch_size]
-        attempt_size = len(leftover)
-        while leftover:
-            chunk = leftover[:attempt_size]
-            got = request_batch(chunk)
-            missing = [cue for cue in chunk if cue.id not in got]
-            by_id.update({cue.id: got[cue.id] for cue in chunk if cue.id in got})
-            unsent = leftover[attempt_size:]
-            if missing:
-                log(f"Incomplete response, retrying {len(missing)} cues")
-                leftover = missing + unsent
-                if attempt_size == 1 and len(chunk) == 1:
-                    raise SystemExit(f"Model response missing cue id {chunk[0].id}")
-                attempt_size = 1 if attempt_size <= 2 else max(1, attempt_size // 2)
-            else:
-                leftover = unsent
-                attempt_size = batch_size
+    leftover = list(cues)
+    attempt_size = batch_size
+    while leftover:
+        chunks = [
+            leftover[index : index + attempt_size]
+            for index in range(0, len(leftover), attempt_size)
+        ]
+        results = map_cue_batches(chunks, request_batch, jobs)
+        missing: list[Cue] = []
+        for chunk, got in zip(chunks, results):
+            for cue in chunk:
+                if cue.id in got:
+                    by_id[cue.id] = got[cue.id]
+                else:
+                    missing.append(cue)
+        if not missing:
+            break
+        log(f"Incomplete response, retrying {len(missing)} cues")
+        if attempt_size == 1:
+            raise SystemExit(f"Model response missing cue id {missing[0].id}")
+        leftover = missing
+        attempt_size = 1 if attempt_size <= 2 else max(1, attempt_size // 2)
     return by_id
 
 
@@ -942,6 +963,7 @@ def segment_cues(
     batch_size: int,
     title: str,
     max_line_chars: int,
+    jobs: int = 1,
 ) -> list[Cue]:
     from pydantic import BaseModel, Field
 
@@ -996,7 +1018,7 @@ def segment_cues(
             return {}
         return {item.id: item for item in parsed.cues}
 
-    by_id = fill_cue_ids(cues, batch_size, request_batch)
+    by_id = fill_cue_ids(cues, batch_size, request_batch, jobs=jobs)
     out: list[Cue] = []
     for cue in cues:
         item = by_id[cue.id]
@@ -1015,6 +1037,7 @@ def translate_cues(
     title: str,
     description: str,
     max_line_chars: int,
+    jobs: int = 1,
 ) -> list[Cue]:
     from pydantic import BaseModel
 
@@ -1072,7 +1095,7 @@ def translate_cues(
             return {}
         return {item.id: item for item in parsed.cues}
 
-    by_id = fill_cue_ids(cues, batch_size, request_batch)
+    by_id = fill_cue_ids(cues, batch_size, request_batch, jobs=jobs)
     out: list[Cue] = []
     for cue in cues:
         item = by_id[cue.id]
@@ -1283,6 +1306,35 @@ def self_test() -> None:
     loaded_cues = cues_from_json(tmp)
     assert loaded_cues[0].original == "Hello"
     assert loaded_cues[0].words[0].word == "Hello"
+    many = [Cue(id=index, start=0.0, end=1.0, original=str(index)) for index in range(5)]
+    sequential_calls: list[tuple[int, ...]] = []
+
+    def sequential_batch(chunk: list[Cue]) -> dict[int, Any]:
+        sequential_calls.append(tuple(cue.id for cue in chunk))
+        return {cue.id: cue.id for cue in chunk}
+
+    filled = fill_cue_ids(many, 2, sequential_batch, jobs=1)
+    assert filled == {index: index for index in range(5)}
+    assert sequential_calls == [(0, 1), (2, 3), (4,)]
+    parallel_ids: list[int] = []
+
+    def parallel_batch(chunk: list[Cue]) -> dict[int, Any]:
+        parallel_ids.extend(cue.id for cue in chunk)
+        return {cue.id: cue.id for cue in chunk}
+
+    filled = fill_cue_ids(many, 2, parallel_batch, jobs=3)
+    assert filled == {index: index for index in range(5)}
+    assert sorted(parallel_ids) == list(range(5))
+    retry_calls: list[tuple[int, ...]] = []
+
+    def incomplete_batch(chunk: list[Cue]) -> dict[int, Any]:
+        retry_calls.append(tuple(cue.id for cue in chunk))
+        if len(chunk) >= 2:
+            return {chunk[0].id: "ok"}
+        return {chunk[0].id: "ok"}
+
+    filled = fill_cue_ids(many[:4], 4, incomplete_batch, jobs=2)
+    assert set(filled) == {0, 1, 2, 3}
     print("self-test ok")
 
 
@@ -1315,6 +1367,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_BATCH_SIZE,
         help="Cues per translation request",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=DEFAULT_JOBS,
+        help="Concurrent segment/translate API requests",
     )
     parser.add_argument(
         "--chunk-seconds",
@@ -1369,6 +1427,8 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.batch_size < 1:
         raise SystemExit("--batch-size must be >= 1")
+    if args.jobs < 1:
+        raise SystemExit("--jobs must be >= 1")
     if args.chunk_seconds < 30:
         raise SystemExit("--chunk-seconds must be >= 30")
     if args.max_line_chars < 0:
@@ -1406,6 +1466,7 @@ def main(argv: list[str] | None = None) -> None:
                 title=video.title,
                 description=video.description,
                 max_line_chars=max_line_chars,
+                jobs=args.jobs,
             )
             write_bilingual_mkv(
                 work=work,
@@ -1453,6 +1514,7 @@ def main(argv: list[str] | None = None) -> None:
             batch_size=args.batch_size,
             title=video.title,
             max_line_chars=max_line_chars,
+            jobs=args.jobs,
         )
         if len(cues) != before:
             log(f"Segmented {before} units into {len(cues)} subtitle cards")
@@ -1466,6 +1528,7 @@ def main(argv: list[str] | None = None) -> None:
             title=video.title,
             description=video.description,
             max_line_chars=max_line_chars,
+            jobs=args.jobs,
         )
         write_bilingual_mkv(
             work=work,
