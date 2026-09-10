@@ -29,7 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypeVar
 
@@ -76,19 +76,20 @@ T = TypeVar("T")
 
 
 @dataclass
+class Word:
+    word: str
+    start: float
+    end: float
+
+
+@dataclass
 class Cue:
     id: int
     start: float
     end: float
     original: str
     zh_hant: str = ""
-
-
-@dataclass
-class Word:
-    word: str
-    start: float
-    end: float
+    words: list[Word] = field(default_factory=list)
 
 
 @dataclass
@@ -270,7 +271,9 @@ def words_to_cues(words: list[Word], max_line_chars: int, max_lines: int = MAX_L
         if text:
             start = batch[0].start
             end = max(batch[-1].end, start + 0.4)
-            cues.append(Cue(id=len(cues), start=start, end=end, original=text))
+            cues.append(
+                Cue(id=len(cues), start=start, end=end, original=text, words=list(batch))
+            )
         batch.clear()
 
     for word in words:
