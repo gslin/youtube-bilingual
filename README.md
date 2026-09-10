@@ -9,7 +9,7 @@ The subtitle track shows the original line above the Traditional Chinese line.
 1. `yt-dlp` downloads the video.
 2. `ffmpeg` extracts 16 kHz mono AAC audio.
 3. OpenAI ASR (`whisper-1` by default) transcribes the audio with segment timestamps.
-4. An OpenAI text model (`gpt-4.1-mini` by default) produces Traditional Chinese for each cue.
+4. An OpenAI text model (`gpt-4.1-mini` by default) produces Traditional Chinese for each cue, using the YouTube title and description as terminology context.
 5. `ffmpeg` muxes a soft ASS subtitle track into an MKV (video and audio are copied).
 
 Timed captions need timestamps. Use `whisper-1` or `gpt-4o-transcribe-diarize`. `gpt-transcribe` and `gpt-4o-transcribe` do not return timestamps, so they cannot be used as the ASR model here.
