@@ -632,6 +632,92 @@ def load_video_info(work: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def find_source_video(work: Path) -> Path:
+    skip_suffixes = {".json", ".m4a", ".ass", ".wav"}
+    candidates = sorted(
+        path
+        for path in work.glob("source.*")
+        if path.suffix.lower() not in skip_suffixes and ".info." not in path.name
+    )
+    if not candidates:
+        raise SystemExit(f"No source video in {work} (expected source.mkv from a previous run)")
+    return candidates[0]
+
+
+def cues_from_json(path: Path) -> list[Cue]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Could not parse {path}: {exc}") from exc
+    if not isinstance(raw, list):
+        raise SystemExit(f"Expected a JSON list in {path}")
+    cues: list[Cue] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        words: list[Word] = []
+        for word in item.get("words") or []:
+            if not isinstance(word, dict):
+                continue
+            token = str(word.get("word") or "").strip()
+            if not token:
+                continue
+            start = float(word.get("start") or 0.0)
+            end = float(word.get("end") or start)
+            words.append(Word(token, start, max(end, start)))
+        cues.append(
+            Cue(
+                id=int(item.get("id") or len(cues)),
+                start=float(item.get("start") or 0.0),
+                end=float(item.get("end") or 0.0),
+                original=str(item.get("original") or ""),
+                zh_hant=str(item.get("zh_hant") or ""),
+                words=words,
+            )
+        )
+    return cues
+
+
+def load_translate_only_run(work: Path) -> tuple[VideoSource, list[Cue]]:
+    segmented = work / "segmented.json"
+    if not segmented.is_file():
+        raise SystemExit(
+            f"Missing {segmented}. Run a full job with --work-dir first "
+            "so segmented.json exists."
+        )
+    video_path = find_source_video(work)
+    info = load_video_info(work)
+    title = str(info.get("title") or video_path.stem).strip() or "video"
+    description = str(info.get("description") or "").strip()
+    cues = cues_from_json(segmented)
+    if not cues:
+        raise SystemExit(f"No cues in {segmented}")
+    return VideoSource(path=video_path, title=title, description=description), cues
+
+
+def write_bilingual_mkv(
+    *,
+    work: Path,
+    video: VideoSource,
+    cues: list[Cue],
+    output: Path | None,
+    max_line_chars: int,
+) -> None:
+    write_json(work / "bilingual.json", [asdict(cue) for cue in cues])
+    ass_text = build_ass(cues, video.title, max_line_chars=max_line_chars)
+    ass_path = work / "bilingual.ass"
+    ass_path.write_text(ass_text, encoding="utf-8")
+    if output is None:
+        output = Path(f"{sanitize_filename(video.title)}.mkv")
+    if output.suffix.lower() != ".mkv":
+        output = output.with_suffix(".mkv")
+    mux_mkv(video.path, ass_path, output)
+    sidecar = output.with_suffix(".ass")
+    sidecar.write_text(ass_text, encoding="utf-8")
+    log(f"Wrote {output}")
+    log(f"Wrote {sidecar}")
+
+
 def extract_audio(video_path: Path, audio_path: Path) -> None:
     run(
         [
@@ -1182,6 +1268,21 @@ def self_test() -> None:
     assert len(split_cues) == 2
     assert split_cues[0].zh_hant == "你好啊"
     assert split_cues[0].end <= split_cues[1].start + 1e-6
+    payload = [
+        {
+            "id": 0,
+            "start": 1.0,
+            "end": 2.0,
+            "original": "Hello",
+            "zh_hant": "",
+            "words": [{"word": "Hello", "start": 1.0, "end": 2.0}],
+        }
+    ]
+    tmp = Path(tempfile.mkdtemp()) / "segmented.json"
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    loaded_cues = cues_from_json(tmp)
+    assert loaded_cues[0].original == "Hello"
+    assert loaded_cues[0].words[0].word == "Hello"
     print("self-test ok")
 
 
@@ -1240,6 +1341,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Do not detect speech onset; keep Whisper timestamps as-is",
     )
+    parser.add_argument(
+        "--translate-only",
+        action="store_true",
+        help="Reuse --work-dir segmented.json and only re-run translation + mux",
+    )
     return parser.parse_args(argv)
 
 
@@ -1248,8 +1354,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.self_test:
         self_test()
         return
-    if not args.url or not args.language:
-        raise SystemExit("url and --language are required (or pass --self-test)")
+    if args.translate_only:
+        if not args.work_dir:
+            raise SystemExit("--translate-only requires --work-dir from a previous full run")
+        if not args.language:
+            raise SystemExit("--language is required")
+    elif not args.url or not args.language:
+        raise SystemExit("url and --language are required (or pass --self-test / --translate-only)")
     if args.asr_model not in TIMESTAMP_ASR_MODELS:
         raise SystemExit(
             "Subtitles need timestamps. Use --asr-model whisper-1 "
@@ -1263,15 +1374,18 @@ def main(argv: list[str] | None = None) -> None:
     if args.max_line_chars < 0:
         raise SystemExit("--max-line-chars must be >= 0")
 
-    which_or_exit("yt-dlp")
+    if not args.translate_only:
+        which_or_exit("yt-dlp")
+        which_or_exit("ffprobe")
     which_or_exit("ffmpeg")
-    which_or_exit("ffprobe")
     language = normalize_language(args.language)
     max_line_chars = args.max_line_chars or default_max_line_chars(language)
     client = get_client()
 
     if args.work_dir:
         work = args.work_dir
+        if args.translate_only and not work.is_dir():
+            raise SystemExit(f"Work directory not found: {work}")
         work.mkdir(parents=True, exist_ok=True)
         cleanup = False
     else:
@@ -1280,6 +1394,27 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         log(f"Work directory: {work}")
+        if args.translate_only:
+            video, cues = load_translate_only_run(work)
+            log(f"Re-translating {len(cues)} segmented cues for {video.title}")
+            cues = translate_cues(
+                client,
+                cues,
+                model=args.model,
+                language=language,
+                batch_size=args.batch_size,
+                title=video.title,
+                description=video.description,
+                max_line_chars=max_line_chars,
+            )
+            write_bilingual_mkv(
+                work=work,
+                video=video,
+                cues=cues,
+                output=args.output,
+                max_line_chars=max_line_chars,
+            )
+            return
         video = download_video(
             args.url,
             work,
@@ -1332,21 +1467,13 @@ def main(argv: list[str] | None = None) -> None:
             description=video.description,
             max_line_chars=max_line_chars,
         )
-        write_json(work / "bilingual.json", [asdict(cue) for cue in cues])
-        ass_text = build_ass(cues, video.title, max_line_chars=max_line_chars)
-        ass_path = work / "bilingual.ass"
-        ass_path.write_text(ass_text, encoding="utf-8")
-
-        output = args.output
-        if output is None:
-            output = Path(f"{sanitize_filename(video.title)}.mkv")
-        if output.suffix.lower() != ".mkv":
-            output = output.with_suffix(".mkv")
-        mux_mkv(video.path, ass_path, output)
-        sidecar = output.with_suffix(".ass")
-        sidecar.write_text(ass_text, encoding="utf-8")
-        log(f"Wrote {output}")
-        log(f"Wrote {sidecar}")
+        write_bilingual_mkv(
+            work=work,
+            video=video,
+            cues=cues,
+            output=args.output,
+            max_line_chars=max_line_chars,
+        )
     finally:
         if cleanup:
             shutil.rmtree(work, ignore_errors=True)

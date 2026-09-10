@@ -66,6 +66,12 @@ Output (in the current directory, unless `-o` is set):
 - `<title>.mkv` — video/audio plus a default bilingual ASS track (`zho`, title `Original + zh-Hant`)
 - `<title>.ass` — the same subtitles as a sidecar file
 
+Re-run translation only (skips download, ASR, VAD, and segmentation). Requires a previous full run that kept `segmented.json` and `source.mkv`:
+
+```bash
+uv run youtube-bilingual --translate-only --work-dir /tmp/yt-bilingual-xxxx -l ja
+```
+
 Helper check that does not call the network:
 
 ```bash
@@ -89,6 +95,7 @@ uv run youtube-bilingual --self-test
 | `--cookies-from-browser` | none | Passed through to yt-dlp (`chrome`, `firefox`, ...) |
 | `--self-test` | off | Run local helper tests and exit |
 | `--no-vad` | off | Keep Whisper timestamps; do not detect speech onset |
+| `--translate-only` | off | Reuse `--work-dir` `segmented.json` and only re-run translation + mux |
 
 Age-gated or login-walled videos:
 
