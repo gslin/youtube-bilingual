@@ -290,6 +290,85 @@ def words_to_cues(words: list[Word], max_line_chars: int, max_lines: int = MAX_L
     return cues
 
 
+def assign_pieces_with_words(cue: Cue, pieces: list[tuple[str, str]]) -> list[Cue] | None:
+    remaining = list(cue.words)
+    if not remaining:
+        return None
+    out: list[Cue] = []
+    for index, (original, zh_hant) in enumerate(pieces):
+        if index == len(pieces) - 1:
+            chunk = remaining
+            remaining = []
+        else:
+            target = max(len(original), 1)
+            chunk = []
+            while remaining and len(join_words(chunk)) < target:
+                chunk.append(remaining.pop(0))
+            if not chunk:
+                return None
+        if not chunk:
+            return None
+        start = chunk[0].start
+        end = max(chunk[-1].end, start + 0.3)
+        out.append(
+            Cue(
+                id=0,
+                start=start,
+                end=end,
+                original=original or join_words(chunk),
+                zh_hant=zh_hant,
+                words=chunk,
+            )
+        )
+    return out
+
+
+def expand_translated_pieces(cue: Cue, pieces: list[tuple[str, str]]) -> list[Cue]:
+    cleaned = [(original.strip(), zh.strip()) for original, zh in pieces if original.strip() or zh.strip()]
+    if not cleaned:
+        return [cue]
+    if len(cleaned) == 1:
+        original, zh_hant = cleaned[0]
+        return [
+            Cue(
+                id=cue.id,
+                start=cue.start,
+                end=cue.end,
+                original=original or cue.original,
+                zh_hant=zh_hant,
+                words=list(cue.words),
+            )
+        ]
+    assigned = assign_pieces_with_words(cue, cleaned)
+    if assigned:
+        return assigned
+    weights = [max(len(original), 1) for original, _zh in cleaned]
+    total = sum(weights)
+    span = max(cue.end - cue.start, 0.35 * len(cleaned))
+    t = cue.start
+    out: list[Cue] = []
+    for index, (original, zh_hant) in enumerate(cleaned):
+        if index == len(cleaned) - 1:
+            end = cue.end
+        else:
+            end = cue.start + span * (sum(weights[: index + 1]) / total)
+        if end <= t:
+            end = t + 0.3
+        out.append(
+            Cue(
+                id=0,
+                start=t,
+                end=end,
+                original=original or cue.original,
+                zh_hant=zh_hant,
+            )
+        )
+        t = end
+    if out[-1].end < cue.end:
+        out[-1].end = cue.end
+    return out
+
+
 def voiced_runs(voiced: list[bool], frame_ms: int, min_run_ms: int = VAD_MIN_RUN_MS) -> list[tuple[float, float]]:
     min_frames = max(1, min_run_ms // frame_ms)
     runs: list[tuple[float, float]] = []
@@ -900,6 +979,26 @@ def self_test() -> None:
     assert packed[0].original == "Hello there friend."
     assert packed[0].start == 1.0
     assert packed[0].end == 2.0
+    source = Cue(
+        id=0,
+        start=1.0,
+        end=5.0,
+        original="Hello there my friend today",
+        words=[
+            Word("Hello", 1.0, 1.4),
+            Word("there", 1.4, 1.8),
+            Word("my", 1.8, 2.2),
+            Word("friend", 2.2, 3.0),
+            Word("today", 3.0, 4.0),
+        ],
+    )
+    split_cues = expand_translated_pieces(
+        source,
+        [("Hello there", "你好啊"), ("my friend today", "我的朋友今天")],
+    )
+    assert len(split_cues) == 2
+    assert split_cues[0].zh_hant == "你好啊"
+    assert split_cues[0].end <= split_cues[1].start + 1e-6
     print("self-test ok")
 
 
