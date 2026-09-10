@@ -43,6 +43,9 @@ DEFAULT_BATCH_SIZE = 100
 DEFAULT_JOBS = 4
 DEFAULT_MAX_LINE_CHARS_CJK = 40
 DEFAULT_MAX_LINE_CHARS_LATIN = 84
+# Noto names Traditional Chinese "TC" (Source Han Sans uses "TW").
+DEFAULT_ORIGINAL_FONT = "Noto Sans CJK JP"
+DEFAULT_CHINESE_FONT = "Noto Sans CJK TC"
 MAX_LINES_PER_CUE = 2
 TRANSLATION_PAUSE_GAP = 0.55
 TRANSLATION_UNIT_LINES = 6
@@ -1212,9 +1215,9 @@ def build_ass(cues: Iterable[Cue], title: str, max_line_chars: int = DEFAULT_MAX
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        "Style: Original,Arial,42,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
+        f"Style: Original,{DEFAULT_ORIGINAL_FONT},42,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
         "0,0,0,0,100,100,0,0,1,2,0,2,60,60,190,1",
-        "Style: Chinese,Arial,52,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
+        f"Style: Chinese,{DEFAULT_CHINESE_FONT},52,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
         "0,0,0,0,100,100,0,0,1,2.4,0,2,60,60,40,1",
         "",
         "[Events]",
@@ -1304,6 +1307,8 @@ def self_test() -> None:
         Cue(id=0, start=1.0, end=3.5, original="Hello, world.", zh_hant="你好，世界。"),
     ]
     ass = build_ass(cues, "test")
+    assert f"Style: Original,{DEFAULT_ORIGINAL_FONT}," in ass
+    assert f"Style: Chinese,{DEFAULT_CHINESE_FONT}," in ass
     assert "Dialogue: 0,0:00:01.00,0:00:03.50,Original,,0,0,0,,Hello, world." in ass
     assert "Dialogue: 0,0:00:01.00,0:00:03.50,Chinese,,0,0,0,,你好，世界。" in ass
     assert clip_text("short", 10) == "short"
