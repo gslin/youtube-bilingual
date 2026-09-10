@@ -4,7 +4,7 @@
 Pipeline:
   1. yt-dlp downloads the video
   2. ffmpeg extracts compressed audio
-  3. OpenAI ASR (whisper-1) transcribes with segment timestamps
+  3. OpenAI ASR (whisper-1) transcribes with word timestamps
   4. An OpenAI text model translates each cue into Traditional Chinese
   5. ffmpeg muxes an ASS subtitle track into an MKV
 
@@ -603,27 +603,23 @@ def transcribe_chunks(
     *,
     asr_model: str,
     language: str,
-) -> list[Cue]:
-    cues: list[Cue] = []
+) -> list[Word]:
+    words: list[Word] = []
     prompt = ""
     for index, (chunk, offset) in enumerate(chunks, start=1):
         log(f"Transcribing chunk {index}/{len(chunks)}: {chunk.name} (offset {offset:.2f}s)")
-        cues.extend(
-            transcribe_file(
-                client,
-                chunk,
-                asr_model=asr_model,
-                language=language,
-                offset=offset,
-                prompt=prompt,
-            )
+        chunk_words = transcribe_file(
+            client,
+            chunk,
+            asr_model=asr_model,
+            language=language,
+            offset=offset,
+            prompt=prompt,
         )
-        if cues:
-            prompt = " ".join(cue.original for cue in cues[-8:])[-220:]
-    numbered = []
-    for i, cue in enumerate(cues):
-        numbered.append(Cue(id=i, start=cue.start, end=cue.end, original=cue.original))
-    return numbered
+        words.extend(chunk_words)
+        if chunk_words:
+            prompt = " ".join(item.word for item in chunk_words[-20:])[-220:]
+    return words
 
 
 def transcribe_file(
@@ -634,7 +630,7 @@ def transcribe_file(
     language: str,
     offset: float,
     prompt: str,
-) -> list[Cue]:
+) -> list[Word]:
     def _create() -> Any:
         with path.open("rb") as audio_file:
             kwargs: dict[str, Any] = {
@@ -647,14 +643,26 @@ def transcribe_file(
                 kwargs["chunking_strategy"] = "auto"
             else:
                 kwargs["response_format"] = "verbose_json"
-                kwargs["timestamp_granularities"] = ["segment"]
+                kwargs["timestamp_granularities"] = ["word", "segment"]
                 if prompt:
                     kwargs["prompt"] = prompt
             return client.audio.transcriptions.create(**kwargs)
 
     result = openai_call(_create)
+    words_raw = field(result, "words") or []
+    words: list[Word] = []
+    for item in words_raw:
+        token = str(field(item, "word") or "").strip()
+        if not token:
+            continue
+        start = float(field(item, "start") or 0.0) + offset
+        end = float(field(item, "end") or start) + offset
+        if end <= start:
+            end = start + 0.05
+        words.append(Word(token, start, end))
+    if words:
+        return words
     segments = field(result, "segments") or []
-    cues: list[Cue] = []
     for seg in segments:
         text = str(field(seg, "text") or "").strip()
         if not text:
@@ -663,8 +671,8 @@ def transcribe_file(
         end = float(field(seg, "end") or start) + offset
         if end <= start:
             end = start + 0.5
-        cues.append(Cue(id=len(cues), start=start, end=end, original=text))
-    return cues
+        words.append(Word(text, start, end))
+    return words
 
 
 def translate_cues(
@@ -986,18 +994,21 @@ def main(argv: list[str] | None = None) -> None:
         audio_path = work / "audio.m4a"
         extract_audio(video.path, audio_path)
         chunks = split_audio(audio_path, work / "chunks", args.chunk_seconds)
-        cues = transcribe_chunks(
+        words = transcribe_chunks(
             client,
             chunks,
             asr_model=args.asr_model,
             language=language,
         )
-        if not cues:
-            raise SystemExit("ASR returned no subtitle cues")
+        if not words:
+            raise SystemExit("ASR returned no words")
+        cues = words_to_cues(words, max_line_chars)
         before = len(cues)
         cues = split_long_cues(cues, max_line_chars)
         if len(cues) != before:
             log(f"Split {before} ASR cues into {len(cues)} for {max_line_chars} chars/line")
+        if not cues:
+            raise SystemExit("ASR returned no subtitle cues")
         write_json(work / "transcript.json", [asdict(cue) for cue in cues])
         translate_cues(
             client,
