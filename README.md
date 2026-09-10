@@ -9,8 +9,9 @@ The subtitle track shows the original line above the Traditional Chinese line.
 1. `yt-dlp` downloads the video.
 2. `ffmpeg` extracts 16 kHz mono AAC audio.
 3. OpenAI ASR (`whisper-1` by default) transcribes the audio with segment timestamps.
-4. An OpenAI text model (`gpt-4.1-mini` by default) produces Traditional Chinese for each cue, using the YouTube title and description as terminology context.
-5. `ffmpeg` muxes a soft ASS subtitle track into an MKV (video and audio are copied).
+4. Long ASR cues are split (about 2 lines each) so they fit on screen. CJK defaults to 20 characters per line; other languages default to 42.
+5. An OpenAI text model (`gpt-4.1-mini` by default) produces Traditional Chinese for each cue, using the YouTube title and description as terminology context.
+6. `ffmpeg` muxes a soft ASS subtitle track into an MKV (video and audio are copied). ASS lines are hard-wrapped with `\\N`.
 
 Timed captions need timestamps. Use `whisper-1` or `gpt-4o-transcribe-diarize`. `gpt-transcribe` and `gpt-4o-transcribe` do not return timestamps, so they cannot be used as the ASR model here.
 
@@ -81,6 +82,7 @@ uv run youtube-bilingual --self-test
 | `--model` | `gpt-4.1-mini` | OpenAI model used for Traditional Chinese lines |
 | `--batch-size` | `40` | Cues per translation request |
 | `--chunk-seconds` | `600` | Audio chunk length when the file exceeds the 25 MB ASR limit |
+| `--max-line-chars` | auto | Max characters per subtitle line (`20` for `ja`/`zh`/`ko`, `42` otherwise) |
 | `--work-dir` | temp dir | Keep intermediate files in this directory |
 | `--keep-work` | off | Do not delete the temp work directory |
 | `--cookies` | none | Netscape `cookies.txt` for yt-dlp |
