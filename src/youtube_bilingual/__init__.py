@@ -73,6 +73,13 @@ class Cue:
     zh_hant: str = ""
 
 
+@dataclass
+class VideoSource:
+    path: Path
+    title: str
+    description: str = ""
+
+
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
@@ -161,7 +168,7 @@ def download_video(
     *,
     cookies: Path | None,
     cookies_from_browser: str | None,
-) -> tuple[Path, str]:
+) -> VideoSource:
     outtmpl = str(work / "source.%(ext)s")
     cmd = [
         "yt-dlp",
@@ -172,6 +179,7 @@ def download_video(
         "mkv",
         "-o",
         outtmpl,
+        "--write-info-json",
         "--print",
         "after_move:%(filepath)s",
         "--print",
@@ -188,13 +196,29 @@ def download_video(
     if len(lines) < 2:
         raise SystemExit(f"yt-dlp did not return filepath/title:\n{result.stdout}")
     video_path = Path(lines[-2])
-    title = lines[-1]
+    printed_title = lines[-1]
     if not video_path.is_file():
-        candidates = sorted(work.glob("source.*"))
+        candidates = sorted(
+            path for path in work.glob("source.*") if path.suffix.lower() != ".json"
+        )
         if not candidates:
             raise SystemExit("yt-dlp finished but the video file was not found")
         video_path = candidates[0]
-    return video_path, title
+    info = load_video_info(work)
+    title = str(info.get("title") or printed_title).strip() or "video"
+    description = str(info.get("description") or "").strip()
+    return VideoSource(path=video_path, title=title, description=description)
+
+
+def load_video_info(work: Path) -> dict[str, Any]:
+    files = sorted(work.glob("*.info.json"))
+    if not files:
+        return {}
+    try:
+        data = json.loads(files[-1].read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def extract_audio(video_path: Path, audio_path: Path) -> None:
@@ -614,15 +638,15 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         log(f"Work directory: {work}")
-        video_path, title = download_video(
+        video = download_video(
             args.url,
             work,
             cookies=args.cookies,
             cookies_from_browser=args.cookies_from_browser,
         )
-        log(f"Downloaded: {title}")
+        log(f"Downloaded: {video.title}")
         audio_path = work / "audio.m4a"
-        extract_audio(video_path, audio_path)
+        extract_audio(video.path, audio_path)
         chunks = split_audio(audio_path, work / "chunks", args.chunk_seconds)
         cues = transcribe_chunks(
             client,
@@ -641,16 +665,16 @@ def main(argv: list[str] | None = None) -> None:
             batch_size=args.batch_size,
         )
         write_json(work / "bilingual.json", [asdict(cue) for cue in cues])
-        ass_text = build_ass(cues, title)
+        ass_text = build_ass(cues, video.title)
         ass_path = work / "bilingual.ass"
         ass_path.write_text(ass_text, encoding="utf-8")
 
         output = args.output
         if output is None:
-            output = Path(f"{sanitize_filename(title)}.mkv")
+            output = Path(f"{sanitize_filename(video.title)}.mkv")
         if output.suffix.lower() != ".mkv":
             output = output.with_suffix(".mkv")
-        mux_mkv(video_path, ass_path, output)
+        mux_mkv(video.path, ass_path, output)
         sidecar = output.with_suffix(".ass")
         sidecar.write_text(ass_text, encoding="utf-8")
         log(f"Wrote {output}")
