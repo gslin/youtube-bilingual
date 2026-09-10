@@ -9,7 +9,7 @@ The subtitle track shows the original line above the Traditional Chinese line.
 1. `yt-dlp` downloads the video.
 2. `ffmpeg` extracts 16 kHz mono AAC audio.
 3. OpenAI ASR (`whisper-1` by default) transcribes the audio with word timestamps.
-4. Local VAD finds the first real speech so intro music is not captioned. Word timings are packed into cues (about 2 lines each). CJK defaults to 20 characters per line; other languages default to 42.
+4. Local VAD finds the first real speech so intro music is not captioned. Word timings are packed into cues (about 2 lines each). CJK defaults to 40 characters per line; other languages default to 84.
 5. An OpenAI text model (`gpt-4.1-mini` by default) translates each cue and splits long lines so the screen shows one original line and one Traditional Chinese line at a time. Title and description are used as terminology context.
 6. `ffmpeg` muxes a soft ASS subtitle track into an MKV (video and audio are copied). ASS lines are hard-wrapped with `\\N`.
 
@@ -82,7 +82,7 @@ uv run youtube-bilingual --self-test
 | `--model` | `gpt-4.1-mini` | OpenAI model used for Traditional Chinese lines |
 | `--batch-size` | `12` | Cues per translation request |
 | `--chunk-seconds` | `600` | Audio chunk length when the file exceeds the 25 MB ASR limit |
-| `--max-line-chars` | auto | Max characters per subtitle line (`20` for `ja`/`zh`/`ko`, `42` otherwise) |
+| `--max-line-chars` | auto | Max characters per subtitle line (`40` for `ja`/`zh`/`ko`, `84` otherwise) |
 | `--work-dir` | temp dir | Keep intermediate files in this directory |
 | `--keep-work` | off | Do not delete the temp work directory |
 | `--cookies` | none | Netscape `cookies.txt` for yt-dlp |
