@@ -1237,37 +1237,117 @@ def build_ass(cues: Iterable[Cue], title: str, max_line_chars: int = DEFAULT_MAX
     return "\n".join(lines)
 
 
+def attachment_mimetype(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".otf", ".otc", ".ttc"}:
+        return "application/vnd.ms-opentype"
+    return "application/x-truetype-font"
+
+
+def font_file_for(family: str) -> Path | None:
+    fc_match = shutil.which("fc-match")
+    if not fc_match:
+        return None
+    result = subprocess.run(
+        [fc_match, "-f", "%{family[0]}\n%{file}\n", f"{family}:style=Regular"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        return None
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    matched_family, raw_path = lines[0], lines[1]
+    if matched_family.casefold() != family.casefold():
+        return None
+    path = Path(raw_path)
+    if not path.is_file():
+        return None
+    return path
+
+
+def subtitle_font_files(families: Iterable[str] | None = None) -> list[Path]:
+    if families is None:
+        families = (DEFAULT_ORIGINAL_FONT, DEFAULT_CHINESE_FONT)
+    seen: set[Path] = set()
+    files: list[Path] = []
+    for family in families:
+        path = font_file_for(family)
+        if path is None:
+            log(f"Font not found: {family}")
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        files.append(resolved)
+    return files
+
+
+def mux_cmd(
+    video_path: Path,
+    ass_path: Path,
+    output_path: Path,
+    font_files: Iterable[Path] = (),
+) -> list[str]:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+        "-i",
+        str(ass_path),
+        "-map",
+        "0:v:0?",
+        "-map",
+        "0:a:0?",
+        "-map",
+        "1:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "copy",
+        "-c:s",
+        "ass",
+        "-metadata:s:s:0",
+        "language=zho",
+        "-metadata:s:s:0",
+        "title=Original + zh-Hant",
+        "-disposition:s:0",
+        "default",
+    ]
+    for index, font in enumerate(font_files):
+        cmd.extend(
+            [
+                "-attach",
+                str(font),
+                f"-metadata:s:t:{index}",
+                f"mimetype={attachment_mimetype(font)}",
+                f"-metadata:s:t:{index}",
+                f"filename={font.name}",
+            ]
+        )
+    cmd.append(str(output_path))
+    return cmd
+
+
 def mux_mkv(video_path: Path, ass_path: Path, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(video_path),
-            "-i",
-            str(ass_path),
-            "-map",
-            "0:v:0?",
-            "-map",
-            "0:a:0?",
-            "-map",
-            "1:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "copy",
-            "-c:s",
-            "ass",
-            "-metadata:s:s:0",
-            "language=zho",
-            "-metadata:s:s:0",
-            "title=Original + zh-Hant",
-            "-disposition:s:0",
-            "default",
-            str(output_path),
-        ]
-    )
+    fonts = subtitle_font_files()
+    if fonts:
+        for font in fonts:
+            size_kib = max(1, font.stat().st_size // 1024)
+            log(f"Embedding subtitle font {font.name} ({size_kib} KiB)")
+    else:
+        log(
+            "Subtitle fonts not found; "
+            f"{DEFAULT_ORIGINAL_FONT} / {DEFAULT_CHINESE_FONT} "
+            "will not be embedded"
+        )
+    run(mux_cmd(video_path, ass_path, output_path, fonts))
 
 
 def load_env() -> None:
@@ -1311,6 +1391,26 @@ def self_test() -> None:
     assert f"Style: Chinese,{DEFAULT_CHINESE_FONT}," in ass
     assert "Dialogue: 0,0:00:01.00,0:00:03.50,Original,,0,0,0,,Hello, world." in ass
     assert "Dialogue: 0,0:00:01.00,0:00:03.50,Chinese,,0,0,0,,你好，世界。" in ass
+    assert font_file_for("DefinitelyNotAFontXYZ-youtube-bilingual") is None
+    font_cmd = mux_cmd(
+        Path("v.mkv"),
+        Path("s.ass"),
+        Path("o.mkv"),
+        [Path("/tmp/NotoSansCJK-Regular.ttc")],
+    )
+    assert font_cmd[-1] == "o.mkv"
+    assert "-attach" in font_cmd
+    attach_at = font_cmd.index("-attach")
+    assert font_cmd[attach_at + 1] == "/tmp/NotoSansCJK-Regular.ttc"
+    assert "mimetype=application/vnd.ms-opentype" in font_cmd
+    assert "filename=NotoSansCJK-Regular.ttc" in font_cmd
+    assert mux_cmd(Path("v.mkv"), Path("s.ass"), Path("o.mkv"))[-1] == "o.mkv"
+    assert "-attach" not in mux_cmd(Path("v.mkv"), Path("s.ass"), Path("o.mkv"))
+    noto_jp = font_file_for(DEFAULT_ORIGINAL_FONT)
+    if noto_jp is not None:
+        assert noto_jp.is_file()
+        embedded = subtitle_font_files()
+        assert noto_jp.resolve() in {path.resolve() for path in embedded}
     assert clip_text("short", 10) == "short"
     assert clip_text("abcdefghij", 8) == "abcdefgh\n..."
     assert split_text("你好。世界。測試", 6) == ["你好。世界。", "測試"]
