@@ -10,7 +10,7 @@ The subtitle track shows the original line above the Traditional Chinese line.
 2. `ffmpeg` extracts 16 kHz mono AAC audio.
 3. OpenAI ASR (`whisper-1` by default) transcribes the audio with word timestamps.
 4. Local VAD finds the first real speech so intro music is not captioned. Word timings are packed into cues (about 2 lines each). CJK defaults to 20 characters per line; other languages default to 42.
-5. An OpenAI text model (`gpt-4.1-mini` by default) produces Traditional Chinese for each cue, using the YouTube title and description as terminology context.
+5. An OpenAI text model (`gpt-4.1-mini` by default) translates each cue and splits long lines so the screen shows one original line and one Traditional Chinese line at a time. Title and description are used as terminology context.
 6. `ffmpeg` muxes a soft ASS subtitle track into an MKV (video and audio are copied). ASS lines are hard-wrapped with `\\N`.
 
 Timed captions need timestamps. Use `whisper-1` or `gpt-4o-transcribe-diarize`. `gpt-transcribe` and `gpt-4o-transcribe` do not return timestamps, so they cannot be used as the ASR model here.
