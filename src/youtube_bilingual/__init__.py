@@ -581,12 +581,12 @@ def translate_cues(
             cue.zh_hant = item.zh_hant.strip()
 
 
-def build_ass(cues: Iterable[Cue], title: str) -> str:
+def build_ass(cues: Iterable[Cue], title: str, max_line_chars: int = DEFAULT_MAX_LINE_CHARS_LATIN) -> str:
     lines = [
         "[Script Info]",
         f"Title: {title}",
         "ScriptType: v4.00+",
-        "WrapStyle: 0",
+        "WrapStyle: 1",
         "ScaledBorderAndShadow: yes",
         "YCbCr Matrix: TV.709",
         "PlayResX: 1920",
@@ -597,8 +597,8 @@ def build_ass(cues: Iterable[Cue], title: str) -> str:
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
         "Style: Original,Arial,42,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
-        "0,0,0,0,100,100,0,0,1,2,0,2,60,60,110,1",
-        "Style: Chinese,Arial,56,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
+        "0,0,0,0,100,100,0,0,1,2,0,2,60,60,190,1",
+        "Style: Chinese,Arial,52,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
         "0,0,0,0,100,100,0,0,1,2.4,0,2,60,60,40,1",
         "",
         "[Events]",
@@ -607,8 +607,8 @@ def build_ass(cues: Iterable[Cue], title: str) -> str:
     for cue in cues:
         start = to_ass_time(cue.start)
         end = to_ass_time(cue.end)
-        original = ass_escape(cue.original)
-        zh = ass_escape(cue.zh_hant)
+        original = wrap_ass_text(cue.original, max_line_chars)
+        zh = wrap_ass_text(cue.zh_hant, max_line_chars)
         lines.append(
             f"Dialogue: 0,{start},{end},Original,,0,0,0,,{original}"
         )
