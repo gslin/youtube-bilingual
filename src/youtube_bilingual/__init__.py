@@ -741,6 +741,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_CHUNK_SECONDS,
         help="Audio chunk length when the file exceeds the 25 MB ASR limit",
     )
+    parser.add_argument(
+        "--max-line-chars",
+        type=int,
+        default=0,
+        help="Max characters per subtitle line (0 = 20 for ja/zh/ko, 42 otherwise)",
+    )
     parser.add_argument("--work-dir", type=Path, help="Keep intermediate files in this directory")
     parser.add_argument("--keep-work", action="store_true", help="Do not delete the work directory")
     parser.add_argument("--cookies", type=Path, help="Netscape cookies.txt for yt-dlp")
@@ -769,11 +775,14 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--batch-size must be >= 1")
     if args.chunk_seconds < 30:
         raise SystemExit("--chunk-seconds must be >= 30")
+    if args.max_line_chars < 0:
+        raise SystemExit("--max-line-chars must be >= 0")
 
     which_or_exit("yt-dlp")
     which_or_exit("ffmpeg")
     which_or_exit("ffprobe")
     language = normalize_language(args.language)
+    max_line_chars = args.max_line_chars or default_max_line_chars(language)
     client = get_client()
 
     if args.work_dir:
@@ -804,6 +813,10 @@ def main(argv: list[str] | None = None) -> None:
         )
         if not cues:
             raise SystemExit("ASR returned no subtitle cues")
+        before = len(cues)
+        cues = split_long_cues(cues, max_line_chars)
+        if len(cues) != before:
+            log(f"Split {before} ASR cues into {len(cues)} for {max_line_chars} chars/line")
         write_json(work / "transcript.json", [asdict(cue) for cue in cues])
         translate_cues(
             client,
@@ -815,7 +828,7 @@ def main(argv: list[str] | None = None) -> None:
             description=video.description,
         )
         write_json(work / "bilingual.json", [asdict(cue) for cue in cues])
-        ass_text = build_ass(cues, video.title)
+        ass_text = build_ass(cues, video.title, max_line_chars=max_line_chars)
         ass_path = work / "bilingual.ass"
         ass_path.write_text(ass_text, encoding="utf-8")
 
