@@ -37,7 +37,13 @@ MAX_DESCRIPTION_CHARS = 4000
 DEFAULT_CHUNK_SECONDS = 10 * 60
 DEFAULT_ASR_MODEL = "whisper-1"
 DEFAULT_TRANSLATE_MODEL = "gpt-4.1-mini"
+DEFAULT_MAX_LINE_CHARS_CJK = 20
+DEFAULT_MAX_LINE_CHARS_LATIN = 42
+MAX_LINES_PER_CUE = 2
 TIMESTAMP_ASR_MODELS = ("whisper-1", "gpt-4o-transcribe-diarize")
+CJK_LANGUAGES = {"zh", "ja", "ko"}
+_STRONG_BREAKS = set("。．.！？!?♪…")
+_WEAK_BREAKS = set("、，,；;：: ")
 LANGUAGE_ALIASES = {
     "jp": "ja",
     "jpn": "ja",
@@ -118,6 +124,112 @@ def clip_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "\n..."
+
+
+def default_max_line_chars(language: str) -> int:
+    return DEFAULT_MAX_LINE_CHARS_CJK if language in CJK_LANGUAGES else DEFAULT_MAX_LINE_CHARS_LATIN
+
+
+def is_cjk_char(ch: str) -> bool:
+    code = ord(ch)
+    return (
+        0x3040 <= code <= 0x30FF
+        or 0x3400 <= code <= 0x9FFF
+        or 0xAC00 <= code <= 0xD7AF
+        or 0xF900 <= code <= 0xFAFF
+        or 0xFF66 <= code <= 0xFF9D
+    )
+
+
+def mainly_cjk(text: str) -> bool:
+    letters = [ch for ch in text if not ch.isspace()]
+    if not letters:
+        return False
+    cjk = sum(1 for ch in letters if is_cjk_char(ch))
+    return cjk / len(letters) >= 0.3
+
+
+def split_text(text: str, max_chars: int) -> list[str]:
+    text = text.replace("\r\n", " ").replace("\n", " ").strip()
+    if not text:
+        return []
+    if max_chars < 4:
+        max_chars = 4
+    if len(text) <= max_chars:
+        return [text]
+    cjk = mainly_cjk(text)
+    parts: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        end = min(i + max_chars, n)
+        if end < n:
+            window = text[i:end]
+            cut = None
+            for idx in range(len(window) - 1, 0, -1):
+                if window[idx] in _STRONG_BREAKS:
+                    cut = i + idx + 1
+                    break
+            if cut is None:
+                for idx in range(len(window) - 1, 0, -1):
+                    ch = window[idx]
+                    if ch in _WEAK_BREAKS or (not cjk and ch.isspace()):
+                        cut = i + idx + 1
+                        break
+            if cut is not None:
+                end = cut
+        part = text[i:end].strip()
+        if part:
+            parts.append(part)
+        if end <= i:
+            end = min(i + max_chars, n)
+        i = end
+    if (
+        len(parts) >= 2
+        and len(parts[-1]) <= 3
+        and parts[-2][-1] not in _STRONG_BREAKS
+        and parts[-2][-1] not in _WEAK_BREAKS
+    ):
+        parts[-2] += parts[-1]
+        parts.pop()
+    return parts or [text]
+
+
+def split_long_cues(cues: list[Cue], max_line_chars: int, max_lines: int = MAX_LINES_PER_CUE) -> list[Cue]:
+    limit = max_line_chars * max_lines
+    out: list[Cue] = []
+    for cue in cues:
+        parts = split_text(cue.original, limit)
+        if len(parts) <= 1:
+            out.append(cue)
+            continue
+        weights = [max(len(part), 1) for part in parts]
+        total = sum(weights)
+        span = max(cue.end - cue.start, 0.3 * len(parts))
+        t = cue.start
+        for index, part in enumerate(parts):
+            if index == len(parts) - 1:
+                end = cue.end
+            else:
+                end = cue.start + span * (sum(weights[: index + 1]) / total)
+            if end <= t:
+                end = t + 0.3
+            out.append(Cue(id=0, start=t, end=end, original=part))
+            t = end
+        if out[-1].end < cue.end:
+            out[-1].end = cue.end
+    return [
+        Cue(id=index, start=item.start, end=item.end, original=item.original, zh_hant=item.zh_hant)
+        for index, item in enumerate(out)
+    ]
+
+
+def wrap_ass_text(text: str, max_chars: int) -> str:
+    return "\\N".join(ass_escape(part) for part in split_text(text, max_chars))
 
 
 def normalize_language(value: str) -> str:
@@ -580,6 +692,21 @@ def self_test() -> None:
     assert "Dialogue: 0,0:00:01.00,0:00:03.50,Chinese,,0,0,0,,你好，世界。" in ass
     assert clip_text("short", 10) == "short"
     assert clip_text("abcdefghij", 8) == "abcdefgh\n..."
+    assert split_text("你好。世界。測試", 6) == ["你好。世界。", "測試"]
+    assert split_text("Hello there, friend", 12) == ["Hello there,", "friend"]
+    long_cue = Cue(
+        id=0,
+        start=0.0,
+        end=4.0,
+        original="你好。這是一段比較長的字幕內容需要被切開。",
+    )
+    split = split_long_cues([long_cue], max_line_chars=8, max_lines=1)
+    assert len(split) >= 2
+    assert all(len(item.original) <= 11 for item in split)
+    wrapped = wrap_ass_text("一二三四五六七八九十一二三四五六七八九十", 8)
+    assert wrapped == "一二三四五六七八\\N九十一二三四五六\\N七八九十"
+    short_wrap = wrap_ass_text("今日はとてもいい天気なので散歩に行きましょう。", 20)
+    assert "\\Nょう。" not in short_wrap
     print("self-test ok")
 
 
